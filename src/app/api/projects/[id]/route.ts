@@ -12,15 +12,42 @@ export async function GET(
     const { id } = await params;
     const supabaseServer = await createServerSupabaseClient();
 
-    // 1. Fetch project using requesting user's Supabase server client (enforcing RLS)
-    let project = await ProjectStore.getProject(id, supabaseServer);
+    // Retrieve current authenticated user session if present
+    const { data: authData } = await supabaseServer.auth.getUser();
+    const authUser = authData?.user || null;
 
-    // 2. If not found via user RLS, check if user is a server-verified Master Admin
-    if (!project) {
-      const isMasterAdmin = await verifyServerMasterAdmin(req);
-      if (isMasterAdmin) {
+    let project: any = null;
+
+    // 1. Fetch project using requesting user's Supabase server client (enforcing RLS)
+    try {
+      project = await ProjectStore.getProject(id, supabaseServer);
+    } catch (rlsErr: any) {
+      console.warn('[GET /api/projects/[id]] RLS fetch notice:', rlsErr?.message);
+    }
+
+    // 2. If RLS query returned null but user is authenticated, verify if user owns the project
+    if (!project && authUser?.id) {
+      try {
         const adminClient = createAdminClient();
-        project = await ProjectStore.getProject(id, adminClient);
+        const candidate = await ProjectStore.getProject(id, adminClient);
+        if (candidate && candidate.user_id === authUser.id) {
+          project = candidate;
+        }
+      } catch (adminErr: any) {
+        console.warn('[GET /api/projects/[id]] Admin fallback notice:', adminErr?.message);
+      }
+    }
+
+    // 3. If still not found, check if requesting user is a server-verified Master Admin
+    if (!project) {
+      try {
+        const isMasterAdmin = await verifyServerMasterAdmin(req);
+        if (isMasterAdmin) {
+          const adminClient = createAdminClient();
+          project = await ProjectStore.getProject(id, adminClient);
+        }
+      } catch (masterAdminErr: any) {
+        console.warn('[GET /api/projects/[id]] Master admin check notice:', masterAdminErr?.message);
       }
     }
 
@@ -28,22 +55,36 @@ export async function GET(
       return NextResponse.json({ success: false, error: 'Project not found' }, { status: 404 });
     }
 
-    const supabase = createAdminClient();
+    // Telemetry & Stats Retrieval (safely wrapped)
+    let job: any = null;
+    let questions: any[] = [];
 
-    // 2. Get latest active processing job if any
-    const { data: job } = await supabase
-      .from('processing_jobs')
-      .select('*')
-      .eq('project_id', id)
-      .order('started_at', { ascending: false })
-      .limit(1)
-      .maybeSingle();
+    try {
+      const adminClient = createAdminClient();
+      const jobRes = await adminClient
+        .from('processing_jobs')
+        .select('*')
+        .eq('project_id', id)
+        .order('started_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      job = jobRes.data || null;
 
-    // 3. Get question counts by subject
-    const { data: questions } = await supabase
-      .from('questions')
-      .select('id, subject, needs_review, confidence')
-      .eq('project_id', id);
+      const qRes = await adminClient
+        .from('questions')
+        .select('id, subject, needs_review, confidence')
+        .eq('project_id', id);
+      questions = qRes.data || [];
+    } catch {
+      // Fallback query using user server client
+      try {
+        const qRes = await supabaseServer
+          .from('questions')
+          .select('id, subject, needs_review, confidence')
+          .eq('project_id', id);
+        questions = qRes.data || [];
+      } catch {}
+    }
 
     const subjectStats: Record<string, number> = {};
     let needsReviewCount = 0;

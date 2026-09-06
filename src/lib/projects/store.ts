@@ -230,29 +230,23 @@ export class ProjectStore {
   static async getProject(id: string, customClient?: any): Promise<ProjectRecord | null> {
     const supabase = customClient || createAdminClient();
 
-    // 1. Fetch from Supabase projects table (Authoritative Source of Truth)
+    // Fetch from Supabase projects table (Authoritative Source of Truth)
     try {
       const { data: project, error } = await supabase
         .from('projects')
         .select('*')
         .eq('id', id)
-        .single();
+        .maybeSingle();
 
       if (project && !error) {
         globalProjectsStore.set(project.id, project as any);
         this.flushDiskCache(project.id);
         return project as any;
       }
-    } catch {
-      // Database query failed or unauthenticated
+    } catch (err: any) {
+      console.warn('[ProjectStore] getProject query notice:', err?.message);
     }
 
-    // 2. Check local memory store for previously verified database record in current process
-    if (globalProjectsStore.has(id)) {
-      return globalProjectsStore.get(id)!;
-    }
-
-    // Explicitly return null if project does not exist in authoritative database
     return null;
   }
 
