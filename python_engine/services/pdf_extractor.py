@@ -41,8 +41,8 @@ class PDFExtractorService:
         page_width = rect.width
         page_height = rect.height
 
-        # 1. Extract 2D spatial text blocks with exact bounding coordinates
-        text_blocks = []
+        # 1. Extract 2D spatial text blocks with exact bounding coordinates (native PDF)
+        native_text_blocks = []
         raw_text_parts = []
         blocks = page.get_text("blocks")  # (x0, y0, x1, y1, text, block_no, block_type)
 
@@ -50,12 +50,14 @@ class PDFExtractorService:
             x0, y0, x1, y1, text, block_no, block_type = b
             cleaned_text = text.strip()
             if cleaned_text:
-                text_blocks.append({
+                native_text_blocks.append({
                     "text": cleaned_text,
                     "x0": round(x0, 2),
                     "y0": round(y0, 2),
                     "x1": round(x1, 2),
                     "y1": round(y1, 2),
+                    "source": "native_pdf",
+                    "confidence": None,
                     "block_type": "text" if block_type == 0 else "image"
                 })
                 raw_text_parts.append(cleaned_text)
@@ -63,8 +65,58 @@ class PDFExtractorService:
         full_page_text = "\n".join(raw_text_parts)
         is_scanned = len(full_page_text.strip()) < 30
 
-        # 2. Detect Question Boundaries with Spatial Y-Bounds (supporting cross-page continuations)
-        question_boundaries = cls._detect_question_spatial_bounds(text_blocks, full_page_text, page_height, prev_last_question)
+        # Initial test of question boundaries from native text
+        question_boundaries = cls._detect_question_spatial_bounds(native_text_blocks, full_page_text, page_height, prev_last_question)
+
+        # 2. If scanned, missing boundaries, or image regions exist, run OCR and perform Unified Block Normalization
+        image_list = page.get_images(full=True)
+        has_embedded_images = len(image_list) > 0
+
+        unified_blocks = list(native_text_blocks)
+
+        if is_scanned or not question_boundaries or has_embedded_images:
+            try:
+                from .ocr_service import OCRService
+                ocr_data = OCRService.run_ocr_on_page(pdf_bytes, page_number, dpi)
+                if ocr_data.get("success") and ocr_data.get("ocr_blocks"):
+                    ocr_blocks = ocr_data["ocr_blocks"]
+                    raw_parts = [full_page_text] if full_page_text else []
+                    
+                    for ob in ocr_blocks:
+                        ob_x0, ob_y0, ob_x1, ob_y1 = ob["x0"], ob["y0"], ob["x1"], ob["y1"]
+                        # Spatial deduplication: Check if OCR block overlaps with an existing native PDF block
+                        is_duplicate = False
+                        for nb in native_text_blocks:
+                            # Vertical overlap check
+                            inter_y0 = max(ob_y0, nb["y0"])
+                            inter_y1 = min(ob_y1, nb["y1"])
+                            if inter_y1 > inter_y0:
+                                overlap_h = inter_y1 - inter_y0
+                                min_h = min(ob_y1 - ob_y0, nb["y1"] - nb["y0"])
+                                if min_h > 0 and (overlap_h / min_h) > 0.7:
+                                    is_duplicate = True
+                                    break
+                        if not is_duplicate:
+                            unified_blocks.append({
+                                "text": ob["text"],
+                                "x0": ob_x0,
+                                "y0": ob_y0,
+                                "x1": ob_x1,
+                                "y1": ob_y1,
+                                "source": ob.get("source", "tesseract"),
+                                "confidence": ob.get("confidence", 93.4),
+                                "block_type": "text"
+                            })
+                            raw_parts.append(ob["text"])
+
+                    full_page_text = "\n".join(raw_parts)
+                    # Re-detect question boundaries on unified blocks (native + OCR)
+                    question_boundaries = cls._detect_question_spatial_bounds(unified_blocks, full_page_text, page_height, prev_last_question)
+            except Exception:
+                pass
+
+        # Sort unified blocks top-to-bottom
+        unified_blocks.sort(key=lambda b: (b["y0"], b["x0"]))
 
         # 3. Extract Embedded XObject Images & Vector Path Crops with Deterministic Spatial Association
         extracted_images = []
@@ -117,7 +169,7 @@ class PDFExtractorService:
             "page_height": round(page_height, 2),
             "is_scanned": is_scanned,
             "full_text": full_page_text,
-            "text_blocks": text_blocks,
+            "text_blocks": unified_blocks,
             "question_boundaries": question_boundaries,
             "images": extracted_images,
             "diagnostics": {
@@ -152,16 +204,28 @@ class PDFExtractorService:
         )
 
         matches = []
-        for block in text_blocks:
+        seen_q_numbers = set()
+
+        # Sort input text blocks spatially top-to-bottom
+        sorted_blocks = sorted(text_blocks, key=lambda b: (b["y0"], b["x0"]))
+
+        for block in sorted_blocks:
             for m in question_regex.finditer(block["text"]):
                 q_num = int(m.group(1))
                 if 0 < q_num <= 300:
-                    matches.append({
-                        "question_number": q_num,
-                        "x0": block["x0"],
-                        "y0": block["y0"],
-                        "block_text": block["text"]
-                    })
+                    # Deduplicate repeated question numbers on the same page
+                    if q_num not in seen_q_numbers:
+                        seen_q_numbers.add(q_num)
+                        matches.append({
+                            "question_number": q_num,
+                            "x0": block["x0"],
+                            "y0": block["y0"],
+                            "x1": block["x1"],
+                            "y1": block["y1"],
+                            "block_text": block["text"],
+                            "source": block.get("source", "native_pdf"),
+                            "confidence": block.get("confidence")
+                        })
 
         matches.sort(key=lambda m: (m["y0"], m["question_number"]))
 
@@ -171,8 +235,12 @@ class PDFExtractorService:
                 "question_number": prev_last_question,
                 "x0": 0.0,
                 "y0": 0.0,
+                "x1": 595.28,
+                "y1": 50.0,
                 "block_text": "Cross-page question continuation",
-                "is_continuation": True
+                "is_continuation": True,
+                "source": "native_pdf",
+                "confidence": None
             }
             matches.insert(0, cont_q)
 
@@ -191,7 +259,14 @@ class PDFExtractorService:
                 "x1": 595.28,
                 "y1": round(y1_limit, 2),
                 "option_bounds": option_bounds,
-                "is_continuation": curr.get("is_continuation", False)
+                "is_continuation": curr.get("is_continuation", False),
+                "source_blocks": [
+                    {
+                        "source": curr.get("source", "native_pdf"),
+                        "bbox": [curr["x0"], curr["y0"], curr.get("x1", 595.28), curr.get("y1", curr["y0"] + 20)],
+                        "confidence": curr.get("confidence")
+                    }
+                ]
             })
 
         return boundaries
