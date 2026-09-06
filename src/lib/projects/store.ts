@@ -210,8 +210,9 @@ export class ProjectStore {
       .single();
 
     if (error) {
-      console.error('[ProjectStore] Supabase DB insert error:', error.message, error.code);
-      throw new Error(`Database project creation failed: ${error.message}`);
+      console.error('[ProjectStore] Supabase DB insert error:', error.message, error.code, error.details, error.hint);
+      const extra = [error.details, error.hint].filter(Boolean).join(' - ');
+      throw new Error(`Database project creation failed: ${error.message}${extra ? ` (${extra})` : ''}`);
     }
 
     if (data) {
