@@ -33,9 +33,61 @@ export interface DocumentRecord {
   created_at: string;
 }
 
+export interface QuestionOptionRecord {
+  id: string;
+  question_id: string;
+  label: string;
+  text: string;
+  order_index: number;
+}
+
+export interface QuestionImageRecord {
+  id: string;
+  question_id: string;
+  option_id: string | null;
+  storage_path_original: string;
+  storage_path_optimized: string | null;
+  image_type: string;
+  original_format: string;
+  optimized_format: string;
+  original_dimensions?: any;
+  optimized_dimensions?: any;
+  original_size_bytes?: number;
+  optimized_size_bytes?: number;
+  compression_percentage?: number;
+  is_svg?: boolean;
+  svg_content?: string | null;
+  order_index: number;
+  source_page?: number | null;
+}
+
+export interface QuestionRecord {
+  id: string;
+  project_id: string;
+  question_number: number;
+  subject: string;
+  chapter: string | null;
+  question_text: string;
+  raw_text?: string | null;
+  answer: string | null;
+  question_type: string;
+  difficulty: string;
+  confidence: number;
+  confidence_breakdown?: any;
+  needs_review: boolean;
+  review_reason: string | null;
+  is_reviewed: boolean;
+  source_pages: number[];
+  options?: QuestionOptionRecord[];
+  images?: QuestionImageRecord[];
+  created_at: string;
+  updated_at: string;
+}
+
 // In-Memory Global Store to ensure persistence across serverless invocations within node process
 const globalProjectsStore = new Map<string, ProjectRecord>();
 const globalDocumentsStore = new Map<string, DocumentRecord>();
+const globalQuestionsStore = new Map<string, Map<string, QuestionRecord>>(); // projectId -> Map<questionId, QuestionRecord>
 
 export class ProjectStore {
   /**
@@ -215,4 +267,235 @@ export class ProjectStore {
       (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
     );
   }
+
+  /**
+   * Saves a question record along with its options and images.
+   */
+  static async saveQuestion(question: QuestionRecord): Promise<QuestionRecord> {
+    // 1. Save in memory store
+    if (!globalQuestionsStore.has(question.project_id)) {
+      globalQuestionsStore.set(question.project_id, new Map());
+    }
+    const projectQs = globalQuestionsStore.get(question.project_id)!;
+    projectQs.set(question.id, question);
+
+    // 2. Persist to Supabase
+    const supabase = createAdminClient();
+    try {
+      const { data: savedQ } = await supabase
+        .from('questions')
+        .upsert(
+          {
+            id: question.id,
+            project_id: question.project_id,
+            question_number: question.question_number,
+            subject: question.subject,
+            chapter: question.chapter || null,
+            question_text: question.question_text,
+            raw_text: question.raw_text || null,
+            answer: question.answer || null,
+            question_type: question.question_type as any,
+            difficulty: question.difficulty as any,
+            confidence: question.confidence,
+            confidence_breakdown: question.confidence_breakdown || {},
+            needs_review: question.needs_review,
+            review_reason: question.review_reason || null,
+            is_reviewed: question.is_reviewed,
+            source_pages: question.source_pages,
+            created_at: question.created_at,
+            updated_at: question.updated_at,
+          },
+          { onConflict: 'project_id,question_number' }
+        )
+        .select()
+        .single();
+
+      if (savedQ) {
+        // Save options
+        if (question.options && question.options.length > 0) {
+          for (const opt of question.options) {
+            try {
+              await supabase.from('question_options').upsert({
+                id: opt.id,
+                question_id: savedQ.id,
+                label: opt.label,
+                text: opt.text,
+                order_index: opt.order_index,
+              });
+            } catch {
+              // Continue
+            }
+          }
+        }
+
+        // Save images
+        if (question.images && question.images.length > 0) {
+          for (const img of question.images) {
+            try {
+              await supabase.from('question_images').upsert({
+                id: img.id,
+                question_id: savedQ.id,
+                option_id: img.option_id || null,
+                storage_path_original: img.storage_path_original,
+                storage_path_optimized: img.storage_path_optimized || null,
+                image_type: img.image_type as any,
+                original_format: img.original_format,
+                optimized_format: img.optimized_format,
+                order_index: img.order_index,
+                source_page: img.source_page || null,
+              });
+            } catch {
+              // Continue
+            }
+          }
+        }
+      }
+    } catch (dbErr) {
+      console.warn('[ProjectStore] Supabase question save notice:', dbErr);
+    }
+
+    return question;
+  }
+
+  /**
+   * Retrieves all questions for a project, merged from Supabase DB and local memory store.
+   */
+  static async getQuestions(projectId: string): Promise<QuestionRecord[]> {
+    const qMap = new Map<string, QuestionRecord>();
+
+    // 1. Get from memory store
+    if (globalQuestionsStore.has(projectId)) {
+      const memoryQs = globalQuestionsStore.get(projectId)!;
+      for (const [_, q] of memoryQs.entries()) {
+        qMap.set(q.id, q);
+      }
+    }
+
+    // 2. Fetch from Supabase DB
+    const supabase = createAdminClient();
+    try {
+      const { data: dbQuestions } = await supabase
+        .from('questions')
+        .select('*, options:question_options(*), images:question_images(*)')
+        .eq('project_id', projectId)
+        .order('question_number', { ascending: true });
+
+      if (dbQuestions && dbQuestions.length > 0) {
+        for (const dbQ of dbQuestions) {
+          const formatted: QuestionRecord = {
+            id: dbQ.id,
+            project_id: dbQ.project_id,
+            question_number: dbQ.question_number,
+            subject: dbQ.subject || 'General',
+            chapter: dbQ.chapter || null,
+            question_text: dbQ.question_text || '',
+            raw_text: dbQ.raw_text || null,
+            answer: dbQ.answer || null,
+            question_type: dbQ.question_type || 'single_correct',
+            difficulty: dbQ.difficulty || 'Medium',
+            confidence: dbQ.confidence || 90,
+            confidence_breakdown: dbQ.confidence_breakdown || {},
+            needs_review: Boolean(dbQ.needs_review),
+            review_reason: dbQ.review_reason || null,
+            is_reviewed: Boolean(dbQ.is_reviewed),
+            source_pages: dbQ.source_pages || [],
+            options: (dbQ.options || []).map((opt: any) => ({
+              id: opt.id,
+              question_id: opt.question_id,
+              label: opt.label || opt.option_label || 'A',
+              text: opt.text || opt.option_text || '',
+              order_index: opt.order_index || 0,
+            })),
+            images: dbQ.images || [],
+            created_at: dbQ.created_at || new Date().toISOString(),
+            updated_at: dbQ.updated_at || new Date().toISOString(),
+          };
+          qMap.set(dbQ.id, formatted);
+        }
+      }
+    } catch (dbErr) {
+      console.warn('[ProjectStore] Supabase getQuestions notice:', dbErr);
+    }
+
+    const result = Array.from(qMap.values()).sort((a, b) => a.question_number - b.question_number);
+    return result;
+  }
+
+  /**
+   * Deletes questions associated with a specific page before reprocessing.
+   */
+  static async deletePageQuestions(projectId: string, pageNumber: number): Promise<void> {
+    if (globalQuestionsStore.has(projectId)) {
+      const memoryQs = globalQuestionsStore.get(projectId)!;
+      for (const [id, q] of memoryQs.entries()) {
+        if (q.source_pages && q.source_pages.includes(pageNumber)) {
+          memoryQs.delete(id);
+        }
+      }
+    }
+
+    const supabase = createAdminClient();
+    try {
+      const { data: oldQs } = await supabase
+        .from('questions')
+        .select('id')
+        .eq('project_id', projectId)
+        .contains('source_pages', [pageNumber]);
+
+      if (oldQs && oldQs.length > 0) {
+        const oldIds = oldQs.map((q) => q.id);
+        await supabase.from('questions').delete().in('id', oldIds);
+      }
+    } catch {
+      // Continue
+    }
+  }
+
+  /**
+   * Updates an existing question in memory and database.
+   */
+  static async updateQuestion(
+    projectId: string,
+    questionId: string,
+    updates: Partial<QuestionRecord>
+  ): Promise<QuestionRecord | null> {
+    const questions = await this.getQuestions(projectId);
+    const existing = questions.find((q) => q.id === questionId);
+    if (!existing) return null;
+
+    const updated: QuestionRecord = {
+      ...existing,
+      ...updates,
+      updated_at: new Date().toISOString(),
+    };
+
+    if (globalQuestionsStore.has(projectId)) {
+      globalQuestionsStore.get(projectId)!.set(questionId, updated);
+    }
+
+    const supabase = createAdminClient();
+    try {
+      await supabase
+        .from('questions')
+        .update({
+          question_number: updated.question_number,
+          subject: updated.subject,
+          chapter: updated.chapter || null,
+          question_text: updated.question_text,
+          answer: updated.answer || null,
+          question_type: updated.question_type as any,
+          difficulty: updated.difficulty as any,
+          needs_review: updated.needs_review,
+          is_reviewed: updated.is_reviewed,
+          review_reason: updated.review_reason || null,
+          updated_at: updated.updated_at,
+        })
+        .eq('id', questionId);
+    } catch {
+      // Continue with memory store update
+    }
+
+    return updated;
+  }
 }
+

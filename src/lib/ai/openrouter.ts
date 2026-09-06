@@ -239,22 +239,24 @@ export class OpenRouterProvider implements AIProvider {
 Your job is to convert raw extracted PDF question-paper text into structured JSON.
 
 CRITICAL EXTRACTION RULES:
-1. NEVER hallucinate or invent question text, options, answers, formulas, or numbers.
-2. Preserve exact mathematical equations, subscripts (e.g. H2O, v1), superscripts (e.g. m/s^2, 10^5), Greek symbols (alpha, beta, theta, lambda), fractions, and units.
-3. Identify question type accurately: "single_correct", "multiple_correct", "assertion_reason", "numerical", "match_the_following", "true_false", "passage", "image_based", or "other".
-4. Determine Subject (Physics, Chemistry, Biology, Mathematics) and Chapter if evident.
-5. If text contains options (A)/(B)/(C)/(D) or 1/2/3/4, structure each into the options array.
-6. If a question is ambiguous, partially cut off, or missing options, set "needs_review": true and explain in "review_reason".
-7. Score confidence (0 to 100) based on extraction clarity.
+1. A SINGLE PDF PAGE ALMOST ALWAYS CONTAINS MULTIPLE QUESTIONS (e.g., 5, 8, 12, or 15 questions per page). YOU MUST EXTRACT EVERY SINGLE QUESTION PRESENT ON THIS PAGE! DO NOT STOP AFTER THE FIRST QUESTION!
+2. PRESERVE ACTUAL QUESTION NUMBERS as printed in the PDF (e.g. if the page has Question 45, Question 46, Question 47, set "question_number": 45, 46, 47). DO NOT RESET QUESTION NUMBERS TO 1 ON EVERY PAGE!
+3. NEVER hallucinate or invent question text, options, answers, formulas, or numbers.
+4. Preserve exact mathematical equations, subscripts (e.g. H2O, v1), superscripts (e.g. m/s^2, 10^5), Greek symbols (alpha, beta, theta, lambda), fractions, and units.
+5. Identify question type accurately: "single_correct", "multiple_correct", "assertion_reason", "numerical", "match_the_following", "true_false", "passage", "image_based", or "other".
+6. Determine Subject (Physics, Chemistry, Biology, Mathematics) and Chapter if evident.
+7. Structure options (A)/(B)/(C)/(D) or 1/2/3/4 into the "options" array.
+8. If a question is ambiguous, partially cut off, or missing options, set "needs_review": true and explain in "review_reason".
+9. Score confidence (0 to 100) based on extraction clarity.
 
 Return JSON in this exact structure:
 {
   "questions": [
     {
-      "question_number": 1,
+      "question_number": 45,
       "subject": "Physics",
       "chapter": "Kinematics",
-      "question_text": "Exact question statement...",
+      "question_text": "First question on page statement...",
       "options": [
         { "label": "A", "text": "10 m/s" },
         { "label": "B", "text": "20 m/s" },
@@ -265,12 +267,27 @@ Return JSON in this exact structure:
       "question_type": "single_correct",
       "difficulty": "Medium",
       "confidence": 96,
-      "confidence_breakdown": {
-        "text": 98,
-        "options": 95,
-        "images": 90,
-        "question_number": 100
-      },
+      "confidence_breakdown": { "text": 98, "options": 95, "images": 90, "question_number": 100 },
+      "needs_review": false,
+      "review_reason": null,
+      "source_pages": [${pageNumber}]
+    },
+    {
+      "question_number": 46,
+      "subject": "Physics",
+      "chapter": "Work, Energy & Power",
+      "question_text": "Second question on page statement...",
+      "options": [
+        { "label": "A", "text": "100 J" },
+        { "label": "B", "text": "200 J" },
+        { "label": "C", "text": "300 J" },
+        { "label": "D", "text": "400 J" }
+      ],
+      "answer": null,
+      "question_type": "single_correct",
+      "difficulty": "Easy",
+      "confidence": 98,
+      "confidence_breakdown": { "text": 99, "options": 98, "images": 95, "question_number": 100 },
       "needs_review": false,
       "review_reason": null,
       "source_pages": [${pageNumber}]

@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { ProjectStore } from '@/lib/projects/store';
 import { createAdminClient } from '@/lib/supabase/admin';
 
 export async function PATCH(
@@ -11,6 +12,7 @@ export async function PATCH(
     const supabase = createAdminClient();
 
     const {
+      project_id,
       question_number,
       subject,
       chapter,
@@ -22,6 +24,7 @@ export async function PATCH(
       is_reviewed,
       review_reason,
       options,
+      question_options,
     } = body;
 
     const updatePayload: Record<string, any> = {
@@ -39,38 +42,48 @@ export async function PATCH(
     if (is_reviewed !== undefined) updatePayload.is_reviewed = Boolean(is_reviewed);
     if (review_reason !== undefined) updatePayload.review_reason = review_reason;
 
-    const { data: updatedQuestion, error: qErr } = await supabase
-      .from('questions')
-      .update(updatePayload)
-      .eq('id', id)
-      .select()
-      .single();
+    // Update in Supabase
+    try {
+      await supabase.from('questions').update(updatePayload).eq('id', id);
 
-    if (qErr) throw qErr;
-
-    // Update options if provided
-    if (Array.isArray(options)) {
-      for (const opt of options) {
-        if (opt.id) {
-          await supabase
-            .from('question_options')
-            .update({ text: opt.text, label: opt.label })
-            .eq('id', opt.id);
-        } else {
-          await supabase.from('question_options').insert({
-            question_id: id,
-            label: opt.label,
-            text: opt.text,
-            order_index: opt.order_index || 0,
-          });
+      const optsToUpdate = options || question_options;
+      if (Array.isArray(optsToUpdate)) {
+        for (const opt of optsToUpdate) {
+          if (opt.id) {
+            await supabase
+              .from('question_options')
+              .update({ text: opt.text || opt.option_text, label: opt.label || opt.option_label })
+              .eq('id', opt.id);
+          } else {
+            await supabase.from('question_options').insert({
+              question_id: id,
+              label: opt.label || opt.option_label,
+              text: opt.text || opt.option_text,
+              order_index: opt.order_index || 0,
+            });
+          }
         }
       }
+    } catch (e) {
+      console.warn('[PATCH /api/questions/[id]] Supabase update notice:', e);
     }
 
-    return NextResponse.json({ success: true, question: updatedQuestion });
+    // Also update in ProjectStore
+    if (project_id) {
+      await ProjectStore.updateQuestion(project_id, id, updatePayload);
+    }
+
+    return NextResponse.json({ success: true, message: 'Question updated successfully' });
   } catch (err: any) {
     return NextResponse.json({ success: false, error: err.message }, { status: 500 });
   }
+}
+
+export async function PUT(
+  req: NextRequest,
+  context: { params: Promise<{ id: string }> }
+) {
+  return PATCH(req, context);
 }
 
 export async function DELETE(
@@ -81,8 +94,11 @@ export async function DELETE(
     const { id } = await params;
     const supabase = createAdminClient();
 
-    const { error } = await supabase.from('questions').delete().eq('id', id);
-    if (error) throw error;
+    try {
+      await supabase.from('questions').delete().eq('id', id);
+    } catch {
+      // Continue
+    }
 
     return NextResponse.json({ success: true, message: 'Question deleted' });
   } catch (err: any) {

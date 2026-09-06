@@ -90,6 +90,9 @@ export async function GET(
       };
     });
 
+    const actualQuestions = await ProjectStore.getQuestions(id);
+    const finalQuestionsDetected = Math.max(totalQuestionsDetected, actualQuestions.length);
+
     const progressPercentage = totalPages > 0 ? Math.round((completedPages / totalPages) * 100) : 0;
 
     return NextResponse.json({
@@ -103,7 +106,7 @@ export async function GET(
       queuedPages,
       failedPages,
       progressPercentage,
-      totalQuestionsDetected,
+      totalQuestionsDetected: finalQuestionsDetected,
       totalImagesDetected,
       firstIncompletePage: firstIncompletePage !== null ? firstIncompletePage : (completedPages < totalPages ? completedPages + 1 : null),
       pages: pageMatrix,

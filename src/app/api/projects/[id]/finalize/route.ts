@@ -57,22 +57,8 @@ export async function POST(
       );
     }
 
-    // 3. Fetch all extracted questions with options and images
-    let questionsList: any[] = [];
-    try {
-      const { data: questionsData } = await supabase
-        .from('questions')
-        .select(`
-          *,
-          options:question_options(*),
-          images:question_images(*)
-        `)
-        .eq('project_id', id)
-        .order('question_number', { ascending: true });
-      questionsList = questionsData || [];
-    } catch {
-      questionsList = [];
-    }
+    // 3. Fetch all extracted questions with options and images via ProjectStore
+    const questionsList = await ProjectStore.getQuestions(id);
 
     const totalDetectedQuestions = questionsList.length || project.extracted_questions || 0;
     const expectedQuestions = project.expected_questions || 180;
