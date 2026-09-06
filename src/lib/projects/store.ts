@@ -84,12 +84,105 @@ export interface QuestionRecord {
   updated_at: string;
 }
 
+import fs from 'fs';
+import path from 'path';
+
 // In-Memory Global Store to ensure persistence across serverless invocations within node process
 const globalProjectsStore = new Map<string, ProjectRecord>();
 const globalDocumentsStore = new Map<string, DocumentRecord>();
 const globalQuestionsStore = new Map<string, Map<string, QuestionRecord>>(); // projectId -> Map<questionId, QuestionRecord>
+const globalPdfStore = new Map<string, Buffer>();
 
 export class ProjectStore {
+  /**
+   * Saves raw PDF buffer to memory and disk cache.
+   */
+  static savePdfBuffer(projectId: string, buffer: Buffer): void {
+    globalPdfStore.set(projectId, buffer);
+    try {
+      const tmpPath = path.join('/tmp', `pdf_${projectId}.pdf`);
+      fs.writeFileSync(tmpPath, buffer);
+    } catch {
+      // Continue
+    }
+  }
+
+  /**
+   * Appends a chunk to the PDF buffer for chunked upload.
+   */
+  static appendPdfChunk(projectId: string, chunkBuffer: Buffer): void {
+    const existing = this.getPdfBuffer(projectId) || Buffer.alloc(0);
+    const combined = Buffer.concat([existing, chunkBuffer]);
+    this.savePdfBuffer(projectId, combined);
+  }
+
+  /**
+   * Retrieves raw PDF buffer from memory or disk cache.
+   */
+  static getPdfBuffer(projectId: string): Buffer | null {
+    if (globalPdfStore.has(projectId)) {
+      return globalPdfStore.get(projectId)!;
+    }
+    try {
+      const tmpPath = path.join('/tmp', `pdf_${projectId}.pdf`);
+      if (fs.existsSync(tmpPath)) {
+        const buf = fs.readFileSync(tmpPath);
+        globalPdfStore.set(projectId, buf);
+        return buf;
+      }
+    } catch {
+      // Fall through
+    }
+    return null;
+  }
+
+  /**
+   * Persists project store state to disk cache.
+   */
+  private static flushDiskCache(projectId: string): void {
+    try {
+      const data = {
+        project: globalProjectsStore.get(projectId) || null,
+        document: globalDocumentsStore.get(projectId) || null,
+        questions: Array.from(globalQuestionsStore.get(projectId)?.values() || []),
+      };
+      const tmpPath = path.join('/tmp', `store_${projectId}.json`);
+      fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2));
+    } catch {
+      // Continue
+    }
+  }
+
+  /**
+   * Reads project store state from disk cache.
+   */
+  private static loadDiskCache(projectId: string): void {
+    try {
+      const tmpPath = path.join('/tmp', `store_${projectId}.json`);
+      if (fs.existsSync(tmpPath)) {
+        const text = fs.readFileSync(tmpPath, 'utf-8');
+        const parsed = JSON.parse(text);
+
+        if (parsed.project) {
+          globalProjectsStore.set(projectId, parsed.project);
+        }
+        if (parsed.document) {
+          globalDocumentsStore.set(projectId, parsed.document);
+        }
+        if (Array.isArray(parsed.questions)) {
+          if (!globalQuestionsStore.has(projectId)) {
+            globalQuestionsStore.set(projectId, new Map());
+          }
+          const qMap = globalQuestionsStore.get(projectId)!;
+          for (const q of parsed.questions) {
+            qMap.set(q.id, q);
+          }
+        }
+      }
+    } catch {
+      // Continue
+    }
+  }
   /**
    * Saves a project record to Supabase database and local store.
    */
@@ -98,6 +191,7 @@ export class ProjectStore {
 
     // 1. Always save in memory store for instant retrieval
     globalProjectsStore.set(project.id, project);
+    this.flushDiskCache(project.id);
 
     // 2. Persist to Supabase database
     try {
@@ -122,6 +216,7 @@ export class ProjectStore {
 
       if (data && !error) {
         globalProjectsStore.set(data.id, data as any);
+        this.flushDiskCache(data.id);
         return data as any;
       }
     } catch (dbErr) {
@@ -135,6 +230,7 @@ export class ProjectStore {
    * Retrieves a project by ID from Supabase or local store.
    */
   static async getProject(id: string): Promise<ProjectRecord | null> {
+    this.loadDiskCache(id);
     const supabase = createAdminClient();
 
     // 1. Try fetching from Supabase database first
@@ -147,6 +243,7 @@ export class ProjectStore {
 
       if (project) {
         globalProjectsStore.set(project.id, project as any);
+        this.flushDiskCache(project.id);
         return project as any;
       }
     } catch {
@@ -175,6 +272,7 @@ export class ProjectStore {
     };
 
     globalProjectsStore.set(id, updated);
+    this.flushDiskCache(id);
 
     const supabase = createAdminClient();
     try {
@@ -191,12 +289,14 @@ export class ProjectStore {
    */
   static async saveDocument(doc: DocumentRecord): Promise<DocumentRecord> {
     globalDocumentsStore.set(doc.project_id, doc);
+    this.flushDiskCache(doc.project_id);
 
     const supabase = createAdminClient();
     try {
       const { data } = await supabase.from('documents').upsert(doc as any).select().single();
       if (data) {
         globalDocumentsStore.set(doc.project_id, data as any);
+        this.flushDiskCache(doc.project_id);
         return data as any;
       }
     } catch {
@@ -210,6 +310,7 @@ export class ProjectStore {
    * Gets a document record for a project.
    */
   static async getDocument(projectId: string): Promise<DocumentRecord | null> {
+    this.loadDiskCache(projectId);
     const supabase = createAdminClient();
 
     try {
@@ -222,6 +323,7 @@ export class ProjectStore {
 
       if (doc) {
         globalDocumentsStore.set(projectId, doc as any);
+        this.flushDiskCache(projectId);
         return doc as any;
       }
     } catch {
@@ -272,12 +374,13 @@ export class ProjectStore {
    * Saves a question record along with its options and images.
    */
   static async saveQuestion(question: QuestionRecord): Promise<QuestionRecord> {
-    // 1. Save in memory store
+    // 1. Save in memory store & disk cache
     if (!globalQuestionsStore.has(question.project_id)) {
       globalQuestionsStore.set(question.project_id, new Map());
     }
     const projectQs = globalQuestionsStore.get(question.project_id)!;
     projectQs.set(question.id, question);
+    this.flushDiskCache(question.project_id);
 
     // 2. Persist to Supabase
     const supabase = createAdminClient();

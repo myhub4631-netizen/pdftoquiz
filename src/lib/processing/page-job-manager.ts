@@ -82,7 +82,14 @@ export class PageJobManager {
     let fileName = `${project?.name || 'document'}.pdf`;
     let pdfBuffer: Buffer | null = null;
 
-    if (doc?.storage_path) {
+    // 1. Check ProjectStore memory and disk cache first
+    pdfBuffer = ProjectStore.getPdfBuffer(projectId);
+    if (pdfBuffer && doc?.file_name) {
+      fileName = doc.file_name;
+    }
+
+    // 2. Download from Supabase Storage bucket 'documents' if not found in ProjectStore
+    if (!pdfBuffer && doc?.storage_path) {
       try {
         const { data: fileData, error: dlErr } = await supabase.storage
           .from('documents')
@@ -92,6 +99,7 @@ export class PageJobManager {
           const arrayBuf = await fileData.arrayBuffer();
           pdfBuffer = Buffer.from(arrayBuf);
           fileName = doc.file_name || fileName;
+          ProjectStore.savePdfBuffer(projectId, pdfBuffer);
         }
       } catch (err) {
         console.warn('[PageJobManager] Storage download notice:', err);
