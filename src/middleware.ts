@@ -32,32 +32,7 @@ export async function middleware(request: NextRequest) {
     data: { user },
   } = await supabase.auth.getUser();
 
-  const pathname = request.nextUrl.pathname;
-
-  // Protect Admin Routes (/admin/*)
-  if (pathname.startsWith('/admin')) {
-    // Allow direct access in development / local testing
-    const isDev = process.env.NODE_ENV !== 'production';
-    if (!user && !isDev && !request.cookies.get('demo_session')) {
-      const url = request.nextUrl.clone();
-      url.pathname = '/login';
-      url.searchParams.set('redirect', pathname);
-      return NextResponse.redirect(url);
-    }
-  }
-
-  // Protect Dashboard & Project Routes (/dashboard/*, /projects/*)
-  if (pathname.startsWith('/dashboard') || pathname.startsWith('/projects')) {
-    // In local development / preview mode, allow direct exploration
-    const isDev = process.env.NODE_ENV !== 'production';
-    if (!user && !isDev && !request.cookies.get('demo_session')) {
-      const url = request.nextUrl.clone();
-      url.pathname = '/login';
-      url.searchParams.set('redirect', pathname);
-      return NextResponse.redirect(url);
-    }
-  }
-
+  // Allow direct public access to all routes without requiring login or signup
   return response;
 }
 

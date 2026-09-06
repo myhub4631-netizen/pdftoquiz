@@ -10,6 +10,10 @@ export default function LoginPage() {
   const [email, setEmail] = useState('admin@questionforge.ai');
   const [password, setPassword] = useState('••••••••••••');
 
+  React.useEffect(() => {
+    router.replace('/dashboard');
+  }, [router]);
+
   function handleLogin(e: React.FormEvent) {
     e.preventDefault();
     router.push('/dashboard');
