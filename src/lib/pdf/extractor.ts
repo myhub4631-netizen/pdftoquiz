@@ -38,6 +38,57 @@ export interface PDFExtractionResult {
 
 export class PDFExtractor {
   /**
+   * Delegates single page spatial parsing to Python FastAPI Document Engine microservice if active.
+   */
+  static async extractPageDataViaPythonEngine(buffer: Buffer, pageNumber: number): Promise<ExtractedPageData | null> {
+    const pythonUrl = process.env.PYTHON_ENGINE_URL || 'http://localhost:8000';
+    try {
+      const res = await fetch(`${pythonUrl}/api/v1/extract-page`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          pdf_base64: buffer.toString('base64'),
+          page_number: pageNumber,
+          dpi: 300,
+          extract_images: true,
+        }),
+      });
+
+      if (!res.ok) return null;
+      const data = await res.json();
+      if (!data.success) return null;
+
+      const pageImages: ExtractedImageItem[] = (data.images || []).map((img: any) => ({
+        id: img.image_id,
+        pageNumber: pageNumber,
+        buffer: Buffer.from(img.image_base64.split(',')[1] || '', 'base64'),
+        mimeType: `image/${img.format || 'png'}`,
+        width: img.width,
+        height: img.height,
+        x: img.x0,
+        y: img.y0,
+        imageType: img.width > 250 ? 'diagram' : 'option_diagram',
+      }));
+
+      return {
+        pageNumber,
+        text: data.full_text || '',
+        questionBoundaries: (data.question_boundaries || []).map((qb: any) => ({
+          questionNumber: qb.question_number,
+          rawText: data.full_text || '',
+          startIndex: 0,
+          endIndex: 0,
+          estimatedY: qb.y0,
+          optionBounds: qb.option_bounds || [],
+        })),
+        images: pageImages,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Parses a PDF buffer and extracts text, layout structures, and embedded diagram images per page.
    */
   static async extractTextAndImagesFromBuffer(buffer: Buffer): Promise<PDFExtractionResult> {

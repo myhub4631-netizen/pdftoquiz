@@ -77,16 +77,22 @@ export async function POST(
     }
 
     try {
-      // 5. Download PDF & Extract raw content for this specific page
+      // 5. Download PDF & Extract content for this specific page
       const { buffer: pdfBuffer } = await PageJobManager.getPdfBufferForProject(id);
-      const pdfResult = await PDFExtractor.extractTextAndImagesFromBuffer(pdfBuffer);
+      
+      // Try high-precision Python Document Engine microservice first
+      let pageData = await PDFExtractor.extractPageDataViaPythonEngine(pdfBuffer, pageNumber);
+      let pdfResult: any = null;
 
-      const pageData = pdfResult.pages.find((p) => p.pageNumber === pageNumber) || {
-        pageNumber,
-        text: '',
-        questionBoundaries: [],
-        images: [],
-      };
+      if (!pageData) {
+        pdfResult = await PDFExtractor.extractTextAndImagesFromBuffer(pdfBuffer);
+        pageData = pdfResult.pages.find((p: any) => p.pageNumber === pageNumber) || {
+          pageNumber,
+          text: '',
+          questionBoundaries: [],
+          images: [],
+        };
+      }
 
       // Detect Subject Permutations/Routing
       const paperStructure = NEETSubjectDetector.analyzePaperStructure(
@@ -96,7 +102,7 @@ export async function POST(
       );
 
       // 6. Process Page Diagrams with Vision & Sharp
-      const pageImages = pdfResult.extractedImages.filter((img) => img.pageNumber === pageNumber);
+      const pageImages = (pdfResult?.extractedImages || pageData?.images || []).filter((img: any) => img.pageNumber === pageNumber);
       const processedPageImages: any[] = [];
 
       const imageSettings = project.image_settings || {
@@ -122,7 +128,7 @@ export async function POST(
               const base64Data = rawImg.buffer.toString('base64');
               const visionResult = await aiProvider.analyzeQuestionImage(
                 base64Data,
-                pageData.text.slice(0, 500)
+                (pageData?.text || '').slice(0, 500)
               );
               suggestedAssoc = visionResult.suggested_association;
               imgType = visionResult.image_type || 'diagram';
@@ -148,9 +154,9 @@ export async function POST(
 
       // 7. AI Question Structuring via OpenRouter
       const pageQuestions: any[] = [];
-      const imageHints = pageImages.map((img) => img.id);
+      const imageHints = pageImages.map((img: any) => img.id);
 
-      if (pageData.text && pageData.text.trim().length > 0) {
+      if (pageData?.text && pageData.text.trim().length > 0) {
         try {
           const aiQuestions = await aiProvider.extractQuestionsFromChunk(
             pageData.text,
@@ -181,7 +187,7 @@ export async function POST(
       }
 
       // Fallback: Regex boundary segmenter if AI returned empty
-      if (pageQuestions.length === 0 && pageData.questionBoundaries.length > 0) {
+      if (pageQuestions.length === 0 && pageData?.questionBoundaries && pageData.questionBoundaries.length > 0) {
         for (const bound of pageData.questionBoundaries) {
           const seg = PDFExtractor.segmentQuestionAndOptions(bound.rawText);
           const mappedSubject = NEETSubjectDetector.getSubjectForQuestion(
