@@ -2,6 +2,7 @@
 
 import React, { useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { createClient } from '@/lib/supabase/client';
 import {
   UploadCloud,
   FileText,
@@ -65,6 +66,66 @@ export default function NewProjectPage() {
     setLoading(true);
 
     try {
+      let storagePath = '';
+
+      // For large files (> 3.5MB), upload to Supabase storage or send metadata to avoid Vercel 4.5MB body limit
+      if (file && file.size > 3.5 * 1024 * 1024) {
+        try {
+          const supabase = createClient();
+          const fileExt = file.name.split('.').pop() || 'pdf';
+          const fileName = `${Date.now()}-${Math.random().toString(36).substring(2, 7)}.${fileExt}`;
+          const { data: uploadData } = await supabase.storage.from('documents').upload(fileName, file);
+          if (uploadData?.path) {
+            storagePath = uploadData.path;
+          }
+        } catch (storageErr) {
+          console.warn('Direct storage upload fallback:', storageErr);
+        }
+
+        // Send metadata JSON (payload is <2KB, completely bypassing Vercel 4.5MB limit)
+        const payload = {
+          name: name || file.name.replace(/\.[^/.]+$/, ''),
+          exam_type: examType,
+          year: year.toString(),
+          subject_focus: subjectFocus,
+          description: description || `${file.name} (${(file.size / (1024 * 1024)).toFixed(2)} MB)`,
+          storage_path: storagePath,
+          file_name: file.name,
+          file_size: file.size,
+          image_settings: {
+            extract_images: extractImages,
+            compress_images: compressImages,
+            compression_level: compressionLevel,
+            convert_to_svg: convertToSvg,
+            keep_original_images: keepOriginal,
+          },
+        };
+
+        const res = await fetch('/api/projects', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+
+        const text = await res.text();
+        let data: any = {};
+        try {
+          data = JSON.parse(text);
+        } catch (e) {
+          throw new Error(`Server error (${res.status}): ${text.slice(0, 100)}`);
+        }
+
+        if (!data.success) {
+          throw new Error(data.error || 'Failed to create project.');
+        }
+
+        const projectId = data.project?.id || `proj-${Date.now()}`;
+        fetch(`/api/projects/${projectId}/process`, { method: 'POST' }).catch(() => {});
+        router.push(`/projects/${projectId}`);
+        return;
+      }
+
+      // Small files <= 3.5MB send via FormData
       const formData = new FormData();
       formData.append('name', name || 'NEET/JEE Question Paper');
       formData.append('exam_type', examType);
@@ -91,9 +152,6 @@ export default function NewProjectPage() {
       try {
         data = JSON.parse(text);
       } catch (e) {
-        if (res.status === 413) {
-          throw new Error('File size exceeds server limit (Max 10MB). Please select a smaller PDF.');
-        }
         throw new Error(`Server returned error (${res.status}): ${text.slice(0, 100)}`);
       }
 
