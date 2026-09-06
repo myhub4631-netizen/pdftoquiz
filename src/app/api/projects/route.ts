@@ -31,7 +31,7 @@ export async function POST(req: NextRequest) {
         : null,
       has_anon_key: Boolean(process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY),
       has_service_role_key: Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY),
-      service_key_prefix: process.env.SUPABASE_SERVICE_ROLE_KEY?.slice(0, 10),
+      service_key_prefix: process.env.SUPABASE_SERVICE_ROLE_KEY?.slice(0, 10) || '',
       service_key_is_service_role: (() => {
         const k = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
         if (k.startsWith('eyJ')) {
@@ -126,7 +126,7 @@ export async function POST(req: NextRequest) {
       };
     }
 
-    // 3. Test Admin Client & Harmless Query
+    // 3. Test Admin Client Probe
     let adminClient: any = null;
     try {
       adminClient = createAdminClient();
@@ -168,26 +168,30 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: false, error: 'Project name is required', diagnostics }, { status: 400 });
     }
 
-    // Determine target user ID
-    let targetUserId = authUser?.id || user_id;
+    // Determine target user ID and client
+    let clientToUse: any;
+    let targetUserId: string;
 
-    // If unauthenticated guest session, ensure targetUserId points to an existing profile
-    if (!targetUserId && adminClient) {
+    if (authUser?.id) {
+      // Authenticated User Flow
+      clientToUse = supabaseServer;
+      targetUserId = authUser.id;
+    } else {
+      // Guest Session Flow: Must use createAdminClient() with SUPABASE_SERVICE_ROLE_KEY
+      clientToUse = createAdminClient(); // Throws clearly if SUPABASE_SERVICE_ROLE_KEY is missing/invalid
+      targetUserId = user_id || '00000000-0000-0000-0000-000000000001';
+
+      // Check if target profile exists
       try {
-        const { data: firstProfile } = await adminClient
-          .from('profiles')
-          .select('id')
-          .limit(1)
-          .maybeSingle();
-
-        if (firstProfile?.id) {
-          targetUserId = firstProfile.id;
-        } else {
-          // If no profile exists, check auth users or create a default guest profile
-          targetUserId = '00000000-0000-0000-0000-000000000001';
+        const { data: profile } = await clientToUse.from('profiles').select('id').eq('id', targetUserId).maybeSingle();
+        if (!profile) {
+          const { data: firstProfile } = await clientToUse.from('profiles').select('id').limit(1).maybeSingle();
+          if (firstProfile?.id) {
+            targetUserId = firstProfile.id;
+          }
         }
       } catch {
-        targetUserId = '00000000-0000-0000-0000-000000000001';
+        // Continue
       }
     }
 
@@ -218,8 +222,7 @@ export async function POST(req: NextRequest) {
       updated_at: nowIso,
     };
 
-    // Save project using ProjectStore
-    const clientToUse = authUser && supabaseServer ? supabaseServer : adminClient;
+    // Save project using ProjectStore with authoritative Supabase database INSERT
     const savedProject = await ProjectStore.saveProject(newProjectRecord, clientToUse);
 
     // Save document record if present
