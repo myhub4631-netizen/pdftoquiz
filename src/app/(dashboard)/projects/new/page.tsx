@@ -195,17 +195,20 @@ export default function NewProjectPage() {
       }
 
       // Trigger parse initiation for the real project UUID
+      const initRes = await fetch(`/api/projects/${projectId}/initiate-parse`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      const initText = await initRes.text();
+      let initData: any = {};
       try {
-        const initRes = await fetch(`/api/projects/${projectId}/initiate-parse`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-        });
-        const initData = await initRes.json();
-        if (!initData.success) {
-          console.warn('[new/page] Initiate parse notice:', initData.error);
-        }
-      } catch (parseErr) {
-        console.warn('[new/page] Initiate parse catch notice:', parseErr);
+        initData = JSON.parse(initText);
+      } catch {
+        throw new Error(`PDF page initialization returned status ${initRes.status}`);
+      }
+
+      if (!initData.success) {
+        throw new Error(initData.error || 'PDF page count initialization failed');
       }
 
       router.push(`/projects/${projectId}`);

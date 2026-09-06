@@ -24,12 +24,18 @@ export async function POST(
     if (currentPdf) {
       try {
         const supabase = createAdminClient();
+        const project = await ProjectStore.getProject(id);
         const doc = await ProjectStore.getDocument(id);
-        const storagePath = doc?.storage_path || `uploads/${id}/original.pdf`;
+        const userId = project?.user_id || doc?.user_id || 'user';
+        const storagePath = doc?.storage_path || `uploads/${userId}/${id}/original.pdf`;
 
-        await supabase.storage
+        const { error: uploadErr } = await supabase.storage
           .from('documents')
           .upload(storagePath, currentPdf, { upsert: true, contentType: 'application/pdf' });
+
+        if (uploadErr) {
+          console.warn('[upload-chunk] Storage upload warning:', uploadErr.message);
+        }
       } catch (storageErr) {
         console.warn('[upload-chunk] Storage upload notice:', storageErr);
       }

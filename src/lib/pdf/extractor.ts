@@ -134,7 +134,11 @@ export class PDFExtractor {
     try {
       const data = await pdfParse(buffer, parseOptions);
       fullText = data.text || '';
-      const totalPages = data.numpages || 1;
+      if (!data.numpages || data.numpages <= 0) {
+        throw new Error('PDF parsing error: Document contains 0 pages or invalid PDF structure.');
+      }
+
+      const totalPages = data.numpages;
 
       // Extract raw image streams from PDF binary XObjects
       const rawExtractedImages = await this.extractImagesFromPdfBuffer(buffer, totalPages);
@@ -175,21 +179,8 @@ export class PDFExtractor {
         extractedImages: allExtractedImages,
       };
     } catch (err: any) {
-      console.error('PDF parsing fallback to raw text extraction:', err);
-      return {
-        totalPages: 1,
-        pages: [
-          {
-            pageNumber: 1,
-            text: buffer.toString('utf-8', 0, Math.min(buffer.length, 50000)),
-            questionBoundaries: [],
-            images: [],
-          },
-        ],
-        fullText: '',
-        detectedQuestionCount: 0,
-        extractedImages: [],
-      };
+      console.error('[PDFExtractor] PDF parsing error:', err);
+      throw new Error(`PDF parsing failed: ${err?.message || 'Invalid or unreadable PDF document'}`);
     }
   }
 
