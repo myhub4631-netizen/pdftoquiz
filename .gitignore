@@ -31,7 +31,6 @@ dist
 
 # Operating System
 .DS_Store
-*.pem
 Thumbs.db
 
 # IDEs
@@ -44,3 +43,4 @@ Thumbs.db
 scratch/
 tmp/
 *.tmp
+supabase/.temp/
