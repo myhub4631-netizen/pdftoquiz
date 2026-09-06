@@ -38,6 +38,9 @@ export async function GET(
     const to = from + limit - 1;
     query = query.range(from, to);
 
+    const { data: questions, count, error } = await query;
+    if (error) throw error;
+
     let questionList = questions || [];
     if (questionList.length === 0) {
       questionList = [

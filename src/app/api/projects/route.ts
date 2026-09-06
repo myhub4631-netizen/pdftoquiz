@@ -12,6 +12,9 @@ export async function GET(req: NextRequest) {
       query = query.eq('user_id', userId);
     }
 
+    const { data: projects, error } = await query;
+    if (error) throw error;
+
     let projectsList = projects || [];
     if (projectsList.length === 0) {
       projectsList = [
