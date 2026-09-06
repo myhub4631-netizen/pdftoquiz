@@ -371,8 +371,33 @@ export class PDFExtractor {
   }
 
   /**
+   * Identifies whether a PDF page is an examination cover/instruction page.
+   */
+  static isInstructionPage(text: string): boolean {
+    const textLower = text.toLowerCase();
+    const instructionKeywords = [
+      'important instructions',
+      'instructions for candidates',
+      'read carefully the following instructions',
+      'general instructions',
+      'test booklet code',
+      'candidate must hand over the answer sheet',
+      'use of an electronic/manual calculator is prohibited',
+      'candidates are governed by all rules',
+    ];
+    let matches = 0;
+    for (const kw of instructionKeywords) {
+      if (textLower.includes(kw)) {
+        matches++;
+      }
+    }
+    return matches >= 1;
+  }
+
+  /**
    * Detects question boundaries using resilient regex patterns for NEET/JEE.
-   * Handles: 1., 1), Q1., Q.1, Question 1, [1], (1), etc.
+   * Handles: 1., Q1., Q.1, Question 1, 1:, etc.
+   * Excludes: Instruction items, option markers (1)-(4), inline numbers, page numbers.
    */
   static detectQuestionBoundaries(text: string): Array<{
     questionNumber: number;
@@ -380,13 +405,27 @@ export class PDFExtractor {
     startIndex: number;
     endIndex: number;
   }> {
-    const questionRegex = /(?:^|\n)\s*(?:Q(?:uestion)?[\s.:-]*|#\s*)?(\d{1,3})[\s.:\)-]+(?=[A-Z0-9\(\[\{\"'`\+\-~✓])/gim;
+    if (this.isInstructionPage(text)) {
+      return [];
+    }
+
+    const questionRegex = /(?:^|\n)\s*(?:(?:Q(?:uestion)?[\s.:-]*|#\s*)(\d{1,3})[\s.:\)-]*|(\d{1,3})\s*[\.:\-]+)[\s\r\n]+(?=[A-Z0-9\(\[\{\"'`\+\-~✓])/gim;
     const matches: Array<{ number: number; index: number }> = [];
+    const seen = new Set<number>();
 
     let match;
     while ((match = questionRegex.exec(text)) !== null) {
-      const qNum = parseInt(match[1], 10);
-      if (qNum > 0 && qNum <= 300) {
+      const qStr = match[1] || match[2];
+      if (!qStr) continue;
+      const qNum = parseInt(qStr, 10);
+
+      if (qNum > 0 && qNum <= 300 && !seen.has(qNum)) {
+        const prefixText = text.slice(0, match.index).trimEnd();
+        if ((prefixText.endsWith('(') || prefixText.endsWith('[')) && !/Q(?:uestion)?$/i.test(prefixText)) {
+          continue;
+        }
+
+        seen.add(qNum);
         matches.push({
           number: qNum,
           index: match.index,

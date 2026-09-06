@@ -187,6 +187,22 @@ class PDFExtractorService:
         }
 
     @classmethod
+    def is_instruction_page(cls, text: str) -> bool:
+        text_lower = text.lower()
+        instruction_keywords = [
+            "important instructions",
+            "instructions for candidates",
+            "read carefully the following instructions",
+            "general instructions",
+            "test booklet code",
+            "candidate must hand over the answer sheet",
+            "use of an electronic/manual calculator is prohibited",
+            "candidates are governed by all rules"
+        ]
+        matches = sum(1 for kw in instruction_keywords if kw in text_lower)
+        return matches >= 1
+
+    @classmethod
     def _detect_question_spatial_bounds(
         cls,
         text_blocks: List[Dict[str, Any]],
@@ -198,8 +214,11 @@ class PDFExtractorService:
         Detects question numbers (Q1., 1), Question 1, etc.) and constructs spatial bounding rectangles.
         If no question number starts at the top of the page, creates a continuation boundary linked to prev_last_question.
         """
+        if cls.is_instruction_page(full_text):
+            return []
+
         question_regex = re.compile(
-            r"(?:^|\n)\s*(?:Q(?:uestion)?[\s.:-]*|#\s*)?(\d{1,3})[\s.:\)-]+(?=[A-Z0-9\(\[\{\"'`\+\-~✓])",
+            r"(?:^|\n)\s*(?:(?:Q(?:uestion)?[\s.:-]*|#\s*)(\d{1,3})[\s.:\)-]*|(\d{1,3})\s*[\.:\-]+)[\s\r\n]+(?=[A-Z0-9\(\[\{\"'`\+\-~✓])",
             re.IGNORECASE
         )
 
@@ -210,9 +229,16 @@ class PDFExtractorService:
         sorted_blocks = sorted(text_blocks, key=lambda b: (b["y0"], b["x0"]))
 
         for block in sorted_blocks:
-            for m in question_regex.finditer(block["text"]):
-                q_num = int(m.group(1))
+            b_text = block["text"]
+            for m in question_regex.finditer(b_text):
+                q_str = m.group(1) or m.group(2)
+                if not q_str:
+                    continue
+                q_num = int(q_str)
                 if 0 < q_num <= 300:
+                    prefix_text = b_text[:m.start()].rstrip()
+                    if (prefix_text.endswith("(") or prefix_text.endswith("[")) and not re.search(r"Q(?:uestion)?$", prefix_text, re.IGNORECASE):
+                        continue
                     # Deduplicate repeated question numbers on the same page
                     if q_num not in seen_q_numbers:
                         seen_q_numbers.add(q_num)

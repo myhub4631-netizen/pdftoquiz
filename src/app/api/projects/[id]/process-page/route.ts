@@ -227,6 +227,16 @@ export async function POST(
         }
       }
 
+      // Diagnostic logging showing physical page, detected question numbers, and counts
+      console.log(`[process-page] Physical Page ${pageNumber} Extraction Diagnostic:`, {
+        physicalPageNumber: pageNumber,
+        isInstructionPage: PDFExtractor.isInstructionPage(pageData?.text || ''),
+        detectedBoundariesCount: pageData?.questionBoundaries?.length || 0,
+        detectedQuestionNumbers: pageData?.questionBoundaries?.map((b: any) => b.questionNumber) || [],
+        finalPageQuestionCount: pageQuestions.length,
+        finalQuestionNumbers: pageQuestions.map((q: any) => q.question_number),
+      });
+
       // 8. Delete previous questions/options/images for this page to prevent duplicates on retry
       await ProjectStore.deletePageQuestions(id, pageNumber);
 

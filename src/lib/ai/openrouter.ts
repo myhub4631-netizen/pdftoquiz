@@ -1,6 +1,7 @@
 import { getActiveAIConfig, ActiveAIConfig } from './config';
 import { AIProvider, AIProviderConnectionTestResult, ExtractedQuestionResult } from './provider';
 import { createAdminClient } from '@/lib/supabase/admin';
+import { PDFExtractor } from '@/lib/pdf/extractor';
 
 export class OpenRouterProvider implements AIProvider {
   private customConfig?: Partial<ActiveAIConfig>;
@@ -235,6 +236,10 @@ export class OpenRouterProvider implements AIProvider {
     examType: string = 'NEET',
     imageHints: string[] = []
   ): Promise<ExtractedQuestionResult[]> {
+    if (PDFExtractor.isInstructionPage(textChunk)) {
+      return [];
+    }
+
     const systemPrompt = `You are QuestionForge AI, a specialized parser for Indian competitive exams (${examType}: Physics, Chemistry, Biology, Mathematics).
 Your job is to convert raw extracted PDF question-paper text into structured JSON.
 
@@ -248,6 +253,7 @@ CRITICAL EXTRACTION RULES:
 7. Structure options (A)/(B)/(C)/(D) or 1/2/3/4 into the "options" array.
 8. If a question is ambiguous, partially cut off, or missing options, set "needs_review": true and explain in "review_reason".
 9. Score confidence (0 to 100) based on extraction clarity.
+10. IF THE PAGE IS AN EXAMINATION INSTRUCTION PAGE, COVER PAGE, RULES FOR CANDIDATES, OR CONTAINS NO ACTUAL EXAM QUESTIONS, RETURN AN EMPTY ARRAY: {"questions": []}. DO NOT TREAT INSTRUCTION NUMBERS (e.g., 1. The test is of 3 hours...) AS QUESTION NUMBERS!
 
 Return JSON in this exact structure:
 {
