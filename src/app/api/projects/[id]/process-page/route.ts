@@ -111,7 +111,7 @@ export async function POST(
 
       // Detect Subject Permutations/Routing
       const paperStructure = NEETSubjectDetector.analyzePaperStructure(
-        pdfResult.fullText,
+        pdfResult?.fullText || pageData?.text || '',
         project.expected_questions || 180,
         project.exam_type
       );
