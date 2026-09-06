@@ -125,13 +125,17 @@ export async function POST(req: NextRequest) {
     const targetUserId = user_id || defaultUserId;
 
     // Ensure default profile exists in Supabase to avoid foreign key constraints
-    await supabase.from('profiles').upsert({
-      id: targetUserId,
-      email: 'guest@questionforge.ai',
-      full_name: 'Guest User',
-      role: 'USER',
-      status: 'ACTIVE',
-    }, { onConflict: 'id' }).catch(() => {});
+    try {
+      await supabase.from('profiles').upsert({
+        id: targetUserId,
+        email: 'guest@questionforge.ai',
+        full_name: 'Guest User',
+        role: 'USER',
+        status: 'ACTIVE',
+      }, { onConflict: 'id' });
+    } catch (e) {
+      // Continue if upsert fails
+    }
 
     const { data: project, error } = await supabase
       .from('projects')
@@ -154,6 +158,22 @@ export async function POST(req: NextRequest) {
       })
       .select()
       .single();
+
+    const createdProjectId = project?.id;
+    if (createdProjectId && (body.storage_path || body.file_name)) {
+      try {
+        await supabase.from('documents').insert({
+          project_id: createdProjectId,
+          user_id: targetUserId,
+          file_name: body.file_name || `${name}.pdf`,
+          file_size_bytes: Number(body.file_size) || 0,
+          mime_type: 'application/pdf',
+          storage_path: body.storage_path || `uploads/${targetUserId}/${createdProjectId}/original.pdf`,
+        });
+      } catch (e) {
+        // Continue if document insert fails
+      }
+    }
 
     if (error || !project) {
       // Fallback synthetic project if Supabase connection has schema mismatch

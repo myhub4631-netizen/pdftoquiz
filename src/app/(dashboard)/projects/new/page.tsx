@@ -3,6 +3,7 @@
 import React, { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
+import { MAX_PDF_SIZE_MB, MAX_PDF_SIZE_BYTES, MAX_PDF_SIZE_EXCEEDED_MESSAGE } from '@/lib/constants';
 import {
   UploadCloud,
   FileText,
@@ -35,17 +36,28 @@ export default function NewProjectPage() {
   const [convertToSvg, setConvertToSvg] = useState(false);
   const [keepOriginal, setKeepOriginal] = useState(false);
 
+  function validateFile(selected: File): boolean {
+    if (selected.type !== 'application/pdf' && !selected.name.toLowerCase().endsWith('.pdf')) {
+      setError('Please upload a valid PDF file.');
+      return false;
+    }
+    if (selected.size > MAX_PDF_SIZE_BYTES) {
+      setError(MAX_PDF_SIZE_EXCEEDED_MESSAGE);
+      return false;
+    }
+    setError(null);
+    return true;
+  }
+
   function handleFileDrop(e: React.DragEvent<HTMLDivElement>) {
     e.preventDefault();
     if (e.dataTransfer.files && e.dataTransfer.files[0]) {
       const selected = e.dataTransfer.files[0];
-      if (selected.type === 'application/pdf' || selected.name.endsWith('.pdf')) {
+      if (validateFile(selected)) {
         setFile(selected);
         if (!name) {
           setName(selected.name.replace(/\.[^/.]+$/, ''));
         }
-      } else {
-        setError('Please upload a valid PDF file.');
       }
     }
   }
@@ -53,9 +65,11 @@ export default function NewProjectPage() {
   function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
     if (e.target.files && e.target.files[0]) {
       const selected = e.target.files[0];
-      setFile(selected);
-      if (!name) {
-        setName(selected.name.replace(/\.[^/.]+$/, ''));
+      if (validateFile(selected)) {
+        setFile(selected);
+        if (!name) {
+          setName(selected.name.replace(/\.[^/.]+$/, ''));
+        }
       }
     }
   }
@@ -63,88 +77,64 @@ export default function NewProjectPage() {
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
+
+    if (!file) {
+      setError('Please select a PDF document to upload.');
+      return;
+    }
+
+    if (file.size > MAX_PDF_SIZE_BYTES) {
+      setError(MAX_PDF_SIZE_EXCEEDED_MESSAGE);
+      return;
+    }
+
     setLoading(true);
 
     try {
       let storagePath = '';
+      const supabase = createClient();
 
-      // For large files (> 3.5MB), upload to Supabase storage or send metadata to avoid Vercel 4.5MB body limit
-      if (file && file.size > 3.5 * 1024 * 1024) {
-        try {
-          const supabase = createClient();
-          const fileExt = file.name.split('.').pop() || 'pdf';
-          const fileName = `${Date.now()}-${Math.random().toString(36).substring(2, 7)}.${fileExt}`;
-          const { data: uploadData } = await supabase.storage.from('documents').upload(fileName, file);
-          if (uploadData?.path) {
-            storagePath = uploadData.path;
-          }
-        } catch (storageErr) {
-          console.warn('Direct storage upload fallback:', storageErr);
+      // ALWAYS Upload PDF directly to Supabase Storage bucket "documents" from browser
+      // This bypasses Vercel 4.5MB request body limits completely for PDFs up to 50 MB
+      try {
+        const fileExt = file.name.split('.').pop() || 'pdf';
+        const uniqueFileName = `${Date.now()}-${Math.random().toString(36).substring(2, 7)}.${fileExt}`;
+        const { data: uploadData, error: uploadErr } = await supabase.storage
+          .from('documents')
+          .upload(uniqueFileName, file, { cacheControl: '3600', upsert: true });
+
+        if (uploadData?.path) {
+          storagePath = uploadData.path;
+        } else if (uploadErr) {
+          console.warn('Supabase storage upload notice:', uploadErr.message);
         }
-
-        // Send metadata JSON (payload is <2KB, completely bypassing Vercel 4.5MB limit)
-        const payload = {
-          name: name || file.name.replace(/\.[^/.]+$/, ''),
-          exam_type: examType,
-          year: year.toString(),
-          subject_focus: subjectFocus,
-          description: description || `${file.name} (${(file.size / (1024 * 1024)).toFixed(2)} MB)`,
-          storage_path: storagePath,
-          file_name: file.name,
-          file_size: file.size,
-          image_settings: {
-            extract_images: extractImages,
-            compress_images: compressImages,
-            compression_level: compressionLevel,
-            convert_to_svg: convertToSvg,
-            keep_original_images: keepOriginal,
-          },
-        };
-
-        const res = await fetch('/api/projects', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        });
-
-        const text = await res.text();
-        let data: any = {};
-        try {
-          data = JSON.parse(text);
-        } catch (e) {
-          throw new Error(`Server error (${res.status}): ${text.slice(0, 100)}`);
-        }
-
-        if (!data.success) {
-          throw new Error(data.error || 'Failed to create project.');
-        }
-
-        const projectId = data.project?.id || `proj-${Date.now()}`;
-        fetch(`/api/projects/${projectId}/process`, { method: 'POST' }).catch(() => {});
-        router.push(`/projects/${projectId}`);
-        return;
+      } catch (storageErr: any) {
+        console.warn('Supabase storage upload fallback:', storageErr?.message);
       }
 
-      // Small files <= 3.5MB send via FormData
-      const formData = new FormData();
-      formData.append('name', name || 'NEET/JEE Question Paper');
-      formData.append('exam_type', examType);
-      formData.append('year', year.toString());
-      formData.append('subject_focus', subjectFocus);
-      formData.append('description', description);
-      formData.append('extract_images', extractImages.toString());
-      formData.append('compress_images', compressImages.toString());
-      formData.append('compression_level', compressionLevel);
-      formData.append('convert_to_svg', convertToSvg.toString());
-      formData.append('keep_original_images', keepOriginal.toString());
-
-      if (file) {
-        formData.append('file', file);
-      }
+      // Send lightweight metadata JSON to Vercel API route (<2 KB payload)
+      const payload = {
+        name: name || file.name.replace(/\.[^/.]+$/, ''),
+        exam_type: examType,
+        year: year.toString(),
+        subject_focus: subjectFocus,
+        description: description || `${file.name} (${(file.size / (1024 * 1024)).toFixed(2)} MB)`,
+        storage_path: storagePath,
+        file_name: file.name,
+        file_size: file.size,
+        image_settings: {
+          extract_images: extractImages,
+          compress_images: compressImages,
+          compression_level: compressionLevel,
+          convert_to_svg: convertToSvg,
+          keep_original_images: keepOriginal,
+        },
+      };
 
       const res = await fetch('/api/projects', {
         method: 'POST',
-        body: formData,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
       });
 
       const text = await res.text();
@@ -152,7 +142,7 @@ export default function NewProjectPage() {
       try {
         data = JSON.parse(text);
       } catch (e) {
-        throw new Error(`Server returned error (${res.status}): ${text.slice(0, 100)}`);
+        throw new Error(`Server returned status (${res.status}): ${text.slice(0, 100)}`);
       }
 
       if (!data.success) {
@@ -161,8 +151,12 @@ export default function NewProjectPage() {
 
       const projectId = data.project?.id || `proj-${Date.now()}`;
 
-      // Automatically trigger processing pipeline in background
-      fetch(`/api/projects/${projectId}/process`, { method: 'POST' }).catch(() => {});
+      // Trigger background processing pipeline sending only project ID
+      fetch(`/api/projects/${projectId}/process`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ projectId }),
+      }).catch(() => {});
 
       router.push(`/projects/${projectId}`);
     } catch (err: any) {

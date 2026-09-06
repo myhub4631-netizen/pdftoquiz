@@ -20,12 +20,36 @@ export async function POST(
       return NextResponse.json({ success: false, error: 'Project not found' }, { status: 404 });
     }
 
-    let pdfBuffer: Buffer;
+    let pdfBuffer: Buffer | null = null;
     let fileName = `${project.name}.pdf`;
+
+    // 1. Try downloading PDF file from Supabase Storage using project document record
+    const { data: doc } = await supabase
+      .from('documents')
+      .select('*')
+      .eq('project_id', id)
+      .limit(1)
+      .maybeSingle();
+
+    if (doc?.storage_path) {
+      try {
+        const { data: fileData } = await supabase.storage
+          .from('documents')
+          .download(doc.storage_path);
+
+        if (fileData) {
+          const arrayBuf = await fileData.arrayBuffer();
+          pdfBuffer = Buffer.from(arrayBuf);
+          fileName = doc.file_name || fileName;
+        }
+      } catch (err) {
+        console.warn('Storage download fallback:', err);
+      }
+    }
 
     const contentType = req.headers.get('content-type') || '';
 
-    if (contentType.includes('multipart/form-data')) {
+    if (!pdfBuffer && contentType.includes('multipart/form-data')) {
       const formData = await req.formData();
       const file = formData.get('file') as File | null;
 
@@ -33,10 +57,10 @@ export async function POST(
         const arrayBuf = await file.arrayBuffer();
         pdfBuffer = Buffer.from(arrayBuf);
         fileName = file.name || fileName;
-      } else {
-        return NextResponse.json({ success: false, error: 'No PDF file in form data' }, { status: 400 });
       }
-    } else {
+    }
+
+    if (!pdfBuffer) {
       // Synthetic benchmark PDF generator for NEET/JEE when testing directly
       const mockPdfText = `%PDF-1.4
 1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
