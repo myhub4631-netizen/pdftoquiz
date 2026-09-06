@@ -38,7 +38,7 @@ export interface PDFExtractionResult {
 
 export class PDFExtractor {
   /**
-   * Delegates single page spatial parsing to Python FastAPI Document Engine microservice if active.
+   * Delegates single page spatial parsing to Python FastAPI Document Engine microservice.
    */
   static async extractPageDataViaPythonEngine(buffer: Buffer, pageNumber: number): Promise<ExtractedPageData | null> {
     const pythonUrl = process.env.PYTHON_ENGINE_URL || 'http://localhost:8000';
@@ -54,9 +54,18 @@ export class PDFExtractor {
         }),
       });
 
-      if (!res.ok) return null;
+      if (!res.ok) {
+        console.warn(`[PDFExtractor] Python Engine returned status ${res.status} at ${pythonUrl}`);
+        return null;
+      }
+
       const data = await res.json();
-      if (!data.success) return null;
+      if (!data.success) {
+        console.warn(`[PDFExtractor] Python Engine error response at ${pythonUrl}:`, data.error);
+        return null;
+      }
+
+      console.log(`[PDFExtractor] ✓ Page ${pageNumber} extracted via Python Engine at ${pythonUrl}`);
 
       const pageImages: ExtractedImageItem[] = (data.images || []).map((img: any) => ({
         id: img.image_id,
@@ -83,7 +92,8 @@ export class PDFExtractor {
         })),
         images: pageImages,
       };
-    } catch {
+    } catch (err: any) {
+      console.warn(`[PDFExtractor] Python Engine unavailable at ${pythonUrl}:`, err?.message || err);
       return null;
     }
   }

@@ -84,7 +84,22 @@ export async function POST(
       let pageData = await PDFExtractor.extractPageDataViaPythonEngine(pdfBuffer, pageNumber);
       let pdfResult: any = null;
 
+      const requirePython = process.env.STRICT_PYTHON_ENGINE === 'true' || process.env.REQUIRE_PYTHON_ENGINE === 'true';
+
       if (!pageData) {
+        if (requirePython) {
+          const pythonUrl = process.env.PYTHON_ENGINE_URL || 'http://localhost:8000';
+          return NextResponse.json(
+            {
+              success: false,
+              pageNumber,
+              status: 'FAILED',
+              error: `Python Document Engine unavailable: Unable to reach microservice at ${pythonUrl}`,
+            },
+            { status: 503 }
+          );
+        }
+
         pdfResult = await PDFExtractor.extractTextAndImagesFromBuffer(pdfBuffer);
         pageData = pdfResult.pages.find((p: any) => p.pageNumber === pageNumber) || {
           pageNumber,
