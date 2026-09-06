@@ -38,10 +38,21 @@ export default function ProjectStatusPage({
   const [isPaused, setIsPaused] = useState(false);
   const [isWorkerRunning, setIsWorkerRunning] = useState(false);
   const [currentProcessingPage, setCurrentProcessingPage] = useState<number | null>(null);
+  const [workerExitReason, setWorkerExitReason] = useState<string | null>(null);
+
   const isWorkerRef = useRef(false);
   const isPausedRef = useRef(false);
+  const componentMountedRef = useRef(true);
 
-  // Keep refs synced with state for loop condition checking
+  useEffect(() => {
+    componentMountedRef.current = true;
+    return () => {
+      componentMountedRef.current = false;
+      isWorkerRef.current = false;
+      isPausedRef.current = true;
+    };
+  }, []);
+
   useEffect(() => {
     isPausedRef.current = isPaused;
   }, [isPaused]);
@@ -69,8 +80,8 @@ export default function ProjectStatusPage({
         // If pages haven't been initiated yet, trigger initiate-parse
         if (statusJson.totalPages === 0 && projJson.project?.status !== 'COMPLETED' && projJson.project?.status !== 'NEEDS_REVIEW') {
           await initiateParse();
-        } else if (statusJson.firstIncompletePage !== null && !isWorkerRef.current && !isPausedRef.current) {
-          // Auto-start worker loop if incomplete pages remain
+        } else if (statusJson.firstIncompletePage !== null && !isWorkerRef.current && !isPausedRef.current && statusJson.failedPages === 0) {
+          // Auto-start worker loop if incomplete pages remain and no unhandled failed pages
           startWorkerLoop();
         }
       }
@@ -119,67 +130,144 @@ export default function ProjectStatusPage({
     return null;
   }
 
-  // Main Worker Loop: Processes pages 1-by-1 using Supabase as source of truth
+  // Main Worker Loop: Processes pages 1-by-1 sequentially using Supabase as source of truth
   async function startWorkerLoop() {
-    if (isWorkerRef.current) return;
+    if (isWorkerRef.current) {
+      console.log('[WORKER] startWorkerLoop called while worker loop is already running. Skipping.');
+      return;
+    }
 
     isWorkerRef.current = true;
+    isPausedRef.current = false;
+    setIsPaused(false);
     setIsWorkerRunning(true);
     setError(null);
+    setWorkerExitReason(null);
+
+    console.log('[WORKER] ==================================================');
+    console.log('[WORKER] start: Initializing page-by-page worker loop...');
+
+    const MAX_PAGE_RETRIES = 3;
+    let pageRetryCount = 0;
+    let exitReason = 'UNKNOWN';
 
     try {
-      while (isWorkerRef.current && !isPausedRef.current) {
+      while (isWorkerRef.current && !isPausedRef.current && componentMountedRef.current) {
+        // 1. Fetch current status from Supabase
         const currentStatus = await refreshStatus();
 
-        if (!currentStatus || currentStatus.totalPages === 0) {
+        if (!componentMountedRef.current) {
+          exitReason = 'COMPONENT_UNMOUNT';
           break;
         }
+
+        if (isPausedRef.current) {
+          exitReason = 'USER_PAUSE';
+          break;
+        }
+
+        if (!currentStatus || currentStatus.totalPages === 0) {
+          console.error('[WORKER] Exit: Could not retrieve valid processing status [API_ERROR]');
+          setError('Failed to load project processing status');
+          exitReason = 'API_ERROR';
+          break;
+        }
+
+        console.log(`[WORKER] current state: totalPages=${currentStatus.totalPages}, completedPages=${currentStatus.completedPages}, failedPages=${currentStatus.failedPages}, queuedPages=${currentStatus.queuedPages}`);
 
         const nextPageNum = currentStatus.firstIncompletePage;
 
-        // All pages completed! Trigger finalization
-        if (nextPageNum === null) {
+        // If all pages are completed -> Trigger finalization & Exit
+        if (nextPageNum === null || currentStatus.completedPages >= currentStatus.totalPages) {
+          console.log('[WORKER] No incomplete pages remain. Triggering project finalization... [COMPLETED]');
           setCurrentProcessingPage(null);
           await finalizeProject();
+          exitReason = 'COMPLETED';
           break;
         }
 
-        // Check if next page is currently in FAILED state and user paused
         const nextPageObj = currentStatus.pages.find((p: any) => p.pageNumber === nextPageNum);
-        if (nextPageObj?.status === 'FAILED' && isPausedRef.current) {
-          break;
-        }
+        const isRetryAttempt = nextPageObj?.status === 'FAILED' || pageRetryCount > 0;
 
+        console.log(`[WORKER] selecting next page -> page=${nextPageNum} (status=${nextPageObj?.status || 'QUEUED'}, retry=${isRetryAttempt}, attempt=${pageRetryCount + 1}/${MAX_PAGE_RETRIES + 1})`);
         setCurrentProcessingPage(nextPageNum);
 
-        // Call process-page endpoint for EXACTLY ONE PAGE
-        const procRes = await fetch(`/api/projects/${id}/process-page`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ pageNumber: nextPageNum }),
-        });
+        // 2. POST /api/projects/${id}/process-page for EXACTLY ONE PAGE
+        let procRes: Response | null = null;
+        let procData: any = null;
+        let fetchError: any = null;
 
-        const procData = await procRes.json();
+        try {
+          console.log(`[WORKER] POST process-page page=${nextPageNum} (retry=${isRetryAttempt})`);
+          procRes = await fetch(`/api/projects/${id}/process-page`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ pageNumber: nextPageNum, retry: isRetryAttempt }),
+          });
 
-        if (!procData.success) {
-          console.warn(`[WorkerLoop] Page ${nextPageNum} returned failure:`, procData.error);
+          const responseText = await procRes.text();
+          try {
+            procData = JSON.parse(responseText);
+          } catch {
+            procData = { success: false, error: `Invalid JSON response: ${responseText.slice(0, 100)}` };
+          }
+        } catch (err: any) {
+          fetchError = err;
+          console.error(`[WORKER] Fetch exception on page ${nextPageNum} [NETWORK_ERROR]:`, err?.message);
+        }
+
+        // 3. Evaluate response
+        if (fetchError || !procRes || !procRes.ok || !procData?.success) {
+          const statusCode = procRes?.status || 0;
+          const errorMsg = procData?.error || procData?.message || fetchError?.message || `HTTP ${statusCode}`;
+
+          console.warn(`[WORKER] response page=${nextPageNum} status=ERROR (httpStatus=${statusCode}): ${errorMsg}`);
+
+          // Auth / Authorization error -> Fatal exit without retry
+          if (statusCode === 401 || statusCode === 403) {
+            console.error(`[WORKER] Fatal Authentication or Authorization Error on page ${nextPageNum} [AUTH_ERROR]`);
+            setError(`Authentication error: ${errorMsg}`);
+            exitReason = 'AUTH_ERROR';
+            break;
+          }
+
+          // Retryable error logic (transient network error, 500, 502, 503, 504, 429, etc.)
+          pageRetryCount++;
+          if (pageRetryCount <= MAX_PAGE_RETRIES && !isPausedRef.current) {
+            const backoffMs = Math.pow(2, pageRetryCount) * 1000;
+            console.warn(`[WORKER] Retrying page ${nextPageNum} in ${backoffMs}ms (Attempt ${pageRetryCount}/${MAX_PAGE_RETRIES}) [API_ERROR / RETRY]`);
+            setError(`Transient error on Page ${nextPageNum}: ${errorMsg}. Retrying in ${backoffMs / 1000}s (${pageRetryCount}/${MAX_PAGE_RETRIES})...`);
+            await new Promise((r) => setTimeout(r, backoffMs));
+            continue;
+          }
+
+          // Max retries exceeded -> Mark exit reason as PAGE_FAILED
+          console.error(`[WORKER] Page ${nextPageNum} exceeded max retries (${MAX_PAGE_RETRIES}) [PAGE_FAILED]`);
+          setError(`Page ${nextPageNum} failed after ${MAX_PAGE_RETRIES} attempts: ${errorMsg}`);
           await refreshStatus();
-          // Pause worker on page failure to allow user to retry
-          setIsPaused(true);
-          isPausedRef.current = true;
+          exitReason = 'PAGE_FAILED';
           break;
         }
 
-        // Delay briefly before next page
+        // Success!
+        console.log(`[WORKER] page=${nextPageNum} completed successfully! (Questions=${procData.questionsCount || 0}, Images=${procData.imagesCount || 0})`);
+        pageRetryCount = 0;
+        setError(null);
+
+        // Brief delay before selecting next page
         await new Promise((r) => setTimeout(r, 600));
       }
     } catch (loopErr: any) {
-      console.error('[WorkerLoop] Fatal error:', loopErr);
-      setError(loopErr?.message || 'Worker process loop encountered an error');
+      console.error('[WORKER] Fatal error in worker loop [UNEXPECTED_EXCEPTION]:', loopErr);
+      setError(loopErr?.message || 'Worker loop encountered an unexpected exception');
+      exitReason = 'UNEXPECTED_EXCEPTION';
     } finally {
       isWorkerRef.current = false;
       setIsWorkerRunning(false);
       setCurrentProcessingPage(null);
+      setWorkerExitReason(exitReason);
+      console.log(`[WORKER] loop finished. Exit Reason: ${exitReason}`);
+      console.log('[WORKER] ==================================================');
       await refreshStatus();
     }
   }
@@ -206,11 +294,13 @@ export default function ProjectStatusPage({
 
   // User Control Actions
   function handlePause() {
+    console.log('[WORKER] handlePause triggered by user [USER_PAUSE]');
     setIsPaused(true);
     isPausedRef.current = true;
   }
 
   function handleResume() {
+    console.log('[WORKER] handleResume triggered by user');
     setIsPaused(false);
     isPausedRef.current = false;
     startWorkerLoop();
@@ -219,10 +309,11 @@ export default function ProjectStatusPage({
   async function handleRetryFailed() {
     if (!statusData?.pages) return;
     const failedPages = statusData.pages.filter((p: any) => p.status === 'FAILED');
+    console.log(`[WORKER] handleRetryFailed triggered for ${failedPages.length} failed page(s)`);
     setIsPaused(false);
     isPausedRef.current = false;
 
-    // Trigger retry for failed pages
+    // Reset failed page statuses so worker can re-claim them
     for (const fp of failedPages) {
       await fetch(`/api/projects/${id}/process-page`, {
         method: 'POST',
