@@ -83,7 +83,28 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   try {
     const supabase = createAdminClient();
-    const body = await req.json();
+    let body: any = {};
+
+    const contentType = req.headers.get('content-type') || '';
+    if (contentType.includes('multipart/form-data') || contentType.includes('form-data')) {
+      const formData = await req.formData();
+      body = {
+        name: formData.get('name')?.toString(),
+        exam_type: formData.get('exam_type')?.toString(),
+        year: formData.get('year')?.toString(),
+        subject_focus: formData.get('subject_focus')?.toString(),
+        description: formData.get('description')?.toString(),
+        image_settings: {
+          extract_images: formData.get('extract_images') === 'true',
+          compress_images: formData.get('compress_images') === 'true',
+          compression_level: formData.get('compression_level')?.toString() || 'Medium',
+          convert_to_svg: formData.get('convert_to_svg') === 'true',
+          keep_original_images: formData.get('keep_original_images') === 'true',
+        },
+      };
+    } else {
+      body = await req.json();
+    }
 
     const {
       name,
@@ -92,7 +113,7 @@ export async function POST(req: NextRequest) {
       subject_focus,
       description,
       image_settings,
-      user_id = '00000000-0000-0000-0000-000000000001', // Fallback default user ID if not authenticated
+      user_id = '00000000-0000-0000-0000-000000000001',
     } = body;
 
     if (!name) {

@@ -86,7 +86,17 @@ export default function NewProjectPage() {
         body: formData,
       });
 
-      const data = await res.json();
+      const text = await res.text();
+      let data: any = {};
+      try {
+        data = JSON.parse(text);
+      } catch (e) {
+        if (res.status === 413) {
+          throw new Error('File size exceeds server limit (Max 10MB). Please select a smaller PDF.');
+        }
+        throw new Error(`Server returned error (${res.status}): ${text.slice(0, 100)}`);
+      }
+
       if (!data.success) {
         throw new Error(data.error || 'Failed to create project.');
       }
