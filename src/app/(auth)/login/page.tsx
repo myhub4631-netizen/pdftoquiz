@@ -65,9 +65,20 @@ export default function LoginPage() {
           throw new Error('Sign in succeeded but no active user session was established.');
         }
       } else {
+        console.log('[Auth Signup] signUp started for email domain:', email.split('@')[1] || 'unknown');
         const { data, error: signUpErr } = await supabase.auth.signUp({
           email,
           password,
+        });
+
+        console.log('[Auth Signup] Supabase signup response:', {
+          hasError: Boolean(signUpErr),
+          errorMessage: signUpErr?.message || null,
+          errorCode: (signUpErr as any)?.code || null,
+          errorStatus: signUpErr?.status || null,
+          hasUser: Boolean(data?.user),
+          userUuid: data?.user?.id || null,
+          hasSession: Boolean(data?.session),
         });
 
         if (signUpErr) {
