@@ -64,10 +64,11 @@ export async function POST(
     const expectedQuestions = project.expected_questions || 180;
     const needsReviewCount = questionsList.filter((q) => q.needs_review).length || project.needs_review_count || 0;
 
-    // Validation: If expected questions = 180 and detected = 178, mark project NEEDS_REVIEW
-    const finalStatus = totalDetectedQuestions < expectedQuestions || needsReviewCount > 0
-      ? 'NEEDS_REVIEW'
-      : 'COMPLETED';
+    // Validation: Check against target expected questions
+    let finalStatus = 'COMPLETED';
+    if (totalDetectedQuestions < expectedQuestions || totalDetectedQuestions > expectedQuestions + 10 || needsReviewCount > 0) {
+      finalStatus = 'NEEDS_REVIEW';
+    }
 
     // 4. Collect image buffers for embedding into Excel workbook
     const imageBuffersMap = new Map<string, { buffer: Buffer; extension: 'png' | 'jpeg' | 'gif' }>();

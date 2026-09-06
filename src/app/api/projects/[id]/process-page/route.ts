@@ -83,7 +83,7 @@ export async function POST(
 
       const pageData = pdfResult.pages.find((p) => p.pageNumber === pageNumber) || {
         pageNumber,
-        text: pdfResult.fullText || '',
+        text: '',
         questionBoundaries: [],
         images: [],
       };
@@ -222,12 +222,12 @@ export async function POST(
         const qData = pageQuestions[idx];
         let qNum = Number(qData.question_number);
 
-        // Auto-correct question number if AI reset numbering or provided invalid number
-        if (!qNum || qNum <= maxPrevQNum || qNum > maxPrevQNum + 30) {
+        // Auto-correct question number only if invalid or out of reasonable bounds
+        if (!qNum || qNum <= 0 || qNum > maxPrevQNum + 30) {
           qNum = maxPrevQNum + idx + 1;
         }
 
-        const qId = qData.id || `q-${id}-p${pageNumber}-q${qNum}-${idx + 1}`;
+        const qId = (qData.id && typeof qData.id === 'string' && qData.id.length >= 32) ? qData.id : crypto.randomUUID();
 
         // Options formatting
         const formattedOptions: any[] = [];
@@ -237,7 +237,7 @@ export async function POST(
           for (let optIdx = 0; optIdx < qData.options.length; optIdx++) {
             const opt = qData.options[optIdx];
             const optLabel = (opt.label || String.fromCharCode(65 + optIdx)).toUpperCase();
-            const optId = opt.id || `opt-${qId}-${optLabel}`;
+            const optId = (opt.id && typeof opt.id === 'string' && opt.id.length >= 32) ? opt.id : crypto.randomUUID();
             formattedOptions.push({
               id: optId,
               question_id: qId,
@@ -259,7 +259,7 @@ export async function POST(
           const { rawImg, processed, suggestedAssoc, imgType } = qImages[imgIdx];
           const optId = suggestedAssoc !== 'question' ? insertedOptionMap.get(suggestedAssoc) || null : null;
           const base64Data = `data:image/${processed.optimizedFormat};base64,${processed.optimizedBuffer.toString('base64')}`;
-          const imgId = `img-${qId}-${imgIdx + 1}`;
+          const imgId = crypto.randomUUID();
 
           formattedImages.push({
             id: imgId,

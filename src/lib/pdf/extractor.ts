@@ -49,9 +49,9 @@ export class PDFExtractor {
     // 1. Parse Text & Page Render stream
     const parseOptions: any = {
       pagerender: (pageData: any) => {
-        return pageData.getTextContent().then((textContent: any) => {
+        return pageData.getTextContent({ normalizeWhitespace: false, disableCombineTextItems: false }).then((textContent: any) => {
           let lastY: number | null = null;
-          let text = '';
+          let text = `\n--- PAGE_SPLIT_${pageData.pageIndex + 1} ---\n`;
           for (const item of textContent.items) {
             if (lastY === item.transform[5] || lastY === null) {
               text += item.str + ' ';
@@ -71,15 +71,17 @@ export class PDFExtractor {
       const totalPages = data.numpages || 1;
 
       // Extract raw image streams from PDF binary XObjects
-      const rawExtractedImages = await this.extractImagesFromPdfBuffer(buffer);
+      const rawExtractedImages = await this.extractImagesFromPdfBuffer(buffer, totalPages);
 
-      // Split rough pages if pagerender produces combined output
-      const rawPages = data.text.split(/(?=\f|\n\s*---\s*Page\s+\d+\s*---\s*\n|\n\s*Page\s+\d+\s+of\s+\d+)/i);
+      // Split text into individual page texts using the page split marker
+      const splitChunks = data.text.split(/\n--- PAGE_SPLIT_\d+ ---\n/);
+      // Filter out leading empty chunk if present
+      const rawPages = splitChunks.filter((txt: string, idx: number) => idx > 0 || txt.trim().length > 0);
       const actualPageCount = Math.max(totalPages, rawPages.length);
 
       for (let i = 0; i < actualPageCount; i++) {
         const pageNumber = i + 1;
-        const pageText = rawPages[i] || (i === 0 ? data.text : '');
+        const pageText = rawPages[i] || '';
         const boundaries = this.detectQuestionBoundaries(pageText);
         detectedCount += boundaries.length;
 
@@ -135,19 +137,114 @@ export class PDFExtractor {
   /**
    * Extracts raster and vector image streams directly from PDF binary objects.
    */
-  static async extractImagesFromPdfBuffer(buffer: Buffer): Promise<ExtractedImageItem[]> {
+  static async extractImagesFromPdfBuffer(buffer: Buffer, totalPagesCount: number = 1): Promise<ExtractedImageItem[]> {
     const images: ExtractedImageItem[] = [];
-    const bufStr = buffer.toString('binary');
-    
-    // Look for embedded JPEG images (/DCTDecode) and PNG/FlateDecode streams
-    const jpegHeader = Buffer.from([0xff, 0xd8, 0xff]);
-    const jpegFooter = Buffer.from([0xff, 0xd9]);
-    const pngHeader = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-
-    let searchIndex = 0;
+    const str = buffer.toString('binary');
     let imageCounter = 1;
 
-    // Scan for direct JPEG streams
+    // Scan PDF stream objects (/Subtype /Image)
+    const streamRegex = /<<\s*\/Type\s*\/XObject\s*\/Subtype\s*\/Image[\s\S]*?>>\s*stream[\r\n]+/g;
+    let match;
+
+    while ((match = streamRegex.exec(str)) !== null) {
+      const headerStr = match[0];
+      const streamStart = match.index + headerStr.length;
+      const endstreamIdx = str.indexOf('endstream', streamStart);
+
+      if (endstreamIdx === -1) continue;
+
+      const streamSlice = buffer.subarray(streamStart, endstreamIdx);
+      const pageEst = Math.max(1, Math.min(totalPagesCount, Math.floor((match.index / buffer.length) * totalPagesCount) + 1));
+
+      // Case 1: /Filter /DCTDecode (JPEG)
+      if (headerStr.includes('/DCTDecode')) {
+        const jpegHeader = Buffer.from([0xff, 0xd8, 0xff]);
+        const headerOffset = streamSlice.indexOf(jpegHeader);
+        if (headerOffset !== -1) {
+          const jpegSlice = streamSlice.subarray(headerOffset);
+          try {
+            const meta = await sharp(jpegSlice).metadata();
+            if (meta.width && meta.height && meta.width >= 40 && meta.height >= 40) {
+              images.push({
+                id: `img_dct_${Date.now()}_${imageCounter++}`,
+                pageNumber: pageEst,
+                buffer: jpegSlice,
+                mimeType: 'image/jpeg',
+                width: meta.width,
+                height: meta.height,
+                imageType: meta.width > 250 ? 'diagram' : 'option_diagram',
+              });
+              continue;
+            }
+          } catch {}
+        }
+      }
+
+      // Case 2: /Filter /FlateDecode (PNG / Zlib)
+      if (headerStr.includes('/FlateDecode')) {
+        try {
+          const zlib = await import('zlib');
+          let decompressed: Buffer;
+          try {
+            decompressed = zlib.inflateSync(streamSlice);
+          } catch {
+            decompressed = zlib.inflateRawSync(streamSlice);
+          }
+
+          const widthMatch = headerStr.match(/\/Width\s+(\d+)/);
+          const heightMatch = headerStr.match(/\/Height\s+(\d+)/);
+          const width = widthMatch ? parseInt(widthMatch[1], 10) : null;
+          const height = heightMatch ? parseInt(heightMatch[1], 10) : null;
+
+          try {
+            const meta = await sharp(decompressed).metadata();
+            if (meta.width && meta.height && meta.width >= 40 && meta.height >= 40) {
+              images.push({
+                id: `img_flate_${Date.now()}_${imageCounter++}`,
+                pageNumber: pageEst,
+                buffer: decompressed,
+                mimeType: `image/${meta.format || 'png'}`,
+                width: meta.width,
+                height: meta.height,
+                imageType: meta.width > 250 ? 'diagram' : 'option_diagram',
+              });
+              continue;
+            }
+          } catch {
+            if (width && height && width >= 40 && height >= 40) {
+              for (const channels of [3, 4, 1]) {
+                if (decompressed.length >= width * height * channels) {
+                  try {
+                    const pngBuf = await sharp(decompressed.subarray(0, width * height * channels), {
+                      raw: { width, height, channels: channels as any },
+                    })
+                      .png()
+                      .toBuffer();
+
+                    images.push({
+                      id: `img_raw_${Date.now()}_${imageCounter++}`,
+                      pageNumber: pageEst,
+                      buffer: pngBuf,
+                      mimeType: 'image/png',
+                      width,
+                      height,
+                      imageType: width > 250 ? 'diagram' : 'option_diagram',
+                    });
+                    break;
+                  } catch {}
+                }
+              }
+            }
+          }
+        } catch {}
+      }
+    }
+
+    // Direct JPEG fallback scanner
+    const jpegHeader = Buffer.from([0xff, 0xd8, 0xff]);
+    const jpegFooter = Buffer.from([0xff, 0xd9]);
+    let searchIndex = 0;
+
     while ((searchIndex = buffer.indexOf(jpegHeader, searchIndex)) !== -1) {
       const footerIndex = buffer.indexOf(jpegFooter, searchIndex + 3);
       if (footerIndex !== -1 && footerIndex - searchIndex > 500 && footerIndex - searchIndex < 10000000) {
@@ -155,11 +252,10 @@ export class PDFExtractor {
         try {
           const meta = await sharp(imageSlice).metadata();
           if (meta.width && meta.height && meta.width >= 40 && meta.height >= 40) {
-            // Rough page estimate based on byte offset in PDF
-            const estimatedPage = Math.max(1, Math.min(100, Math.floor((searchIndex / buffer.length) * 20) + 1));
+            const pageEst = Math.max(1, Math.min(totalPagesCount, Math.floor((searchIndex / buffer.length) * totalPagesCount) + 1));
             images.push({
               id: `img_${Date.now()}_${imageCounter++}`,
-              pageNumber: estimatedPage,
+              pageNumber: pageEst,
               buffer: imageSlice,
               mimeType: 'image/jpeg',
               width: meta.width,
@@ -167,43 +263,10 @@ export class PDFExtractor {
               imageType: meta.width > 250 ? 'diagram' : 'option_diagram',
             });
           }
-        } catch {
-          // Not a valid standalone JPEG, continue search
-        }
+        } catch {}
         searchIndex = footerIndex + 2;
       } else {
         searchIndex += 3;
-      }
-    }
-
-    // Scan for direct PNG streams
-    searchIndex = 0;
-    while ((searchIndex = buffer.indexOf(pngHeader, searchIndex)) !== -1) {
-      // Find PNG IEND chunk
-      const iendHeader = Buffer.from([0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82]);
-      const iendIndex = buffer.indexOf(iendHeader, searchIndex + 8);
-      if (iendIndex !== -1 && iendIndex - searchIndex > 200 && iendIndex - searchIndex < 10000000) {
-        const imageSlice = buffer.subarray(searchIndex, iendIndex + 8);
-        try {
-          const meta = await sharp(imageSlice).metadata();
-          if (meta.width && meta.height && meta.width >= 40 && meta.height >= 40) {
-            const estimatedPage = Math.max(1, Math.min(100, Math.floor((searchIndex / buffer.length) * 20) + 1));
-            images.push({
-              id: `img_${Date.now()}_${imageCounter++}`,
-              pageNumber: estimatedPage,
-              buffer: imageSlice,
-              mimeType: 'image/png',
-              width: meta.width,
-              height: meta.height,
-              imageType: meta.width > 250 ? 'diagram' : 'option_diagram',
-            });
-          }
-        } catch {
-          // Not a valid standalone PNG
-        }
-        searchIndex = iendIndex + 8;
-      } else {
-        searchIndex += 8;
       }
     }
 

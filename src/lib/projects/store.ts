@@ -379,7 +379,53 @@ export class ProjectStore {
       globalQuestionsStore.set(question.project_id, new Map());
     }
     const projectQs = globalQuestionsStore.get(question.project_id)!;
-    projectQs.set(question.id, question);
+
+    // Check if question with same question_number already exists for this project
+    let existingKey: string | null = null;
+    for (const [id, existingQ] of projectQs.entries()) {
+      if (existingQ.question_number === question.question_number) {
+        existingKey = id;
+        break;
+      }
+    }
+
+    let targetQuestion = question;
+
+    if (existingKey) {
+      const existing = projectQs.get(existingKey)!;
+      const combinedPages = Array.from(new Set([...(existing.source_pages || []), ...(question.source_pages || [])])).sort((a, b) => a - b);
+
+      const optMap = new Map<string, QuestionOptionRecord>();
+      (existing.options || []).forEach((o) => optMap.set(o.label.toUpperCase(), o));
+      (question.options || []).forEach((o) => {
+        const lbl = o.label.toUpperCase();
+        if (!optMap.has(lbl) || (o.text && o.text.length > (optMap.get(lbl)?.text?.length || 0))) {
+          optMap.set(lbl, o);
+        }
+      });
+
+      const imgMap = new Map<string, QuestionImageRecord>();
+      (existing.images || []).forEach((i) => imgMap.set(i.id, i));
+      (question.images || []).forEach((i) => imgMap.set(i.id, i));
+
+      const bestText = question.question_text.length >= existing.question_text.length ? question.question_text : existing.question_text;
+
+      targetQuestion = {
+        ...existing,
+        ...question,
+        id: existing.id,
+        question_text: bestText,
+        source_pages: combinedPages,
+        options: Array.from(optMap.values()).sort((a, b) => a.order_index - b.order_index),
+        images: Array.from(imgMap.values()),
+        updated_at: new Date().toISOString(),
+      };
+
+      projectQs.set(existing.id, targetQuestion);
+    } else {
+      projectQs.set(question.id, question);
+    }
+
     this.flushDiskCache(question.project_id);
 
     // 2. Persist to Supabase
@@ -389,24 +435,24 @@ export class ProjectStore {
         .from('questions')
         .upsert(
           {
-            id: question.id,
-            project_id: question.project_id,
-            question_number: question.question_number,
-            subject: question.subject,
-            chapter: question.chapter || null,
-            question_text: question.question_text,
-            raw_text: question.raw_text || null,
-            answer: question.answer || null,
-            question_type: question.question_type as any,
-            difficulty: question.difficulty as any,
-            confidence: question.confidence,
-            confidence_breakdown: question.confidence_breakdown || {},
-            needs_review: question.needs_review,
-            review_reason: question.review_reason || null,
-            is_reviewed: question.is_reviewed,
-            source_pages: question.source_pages,
-            created_at: question.created_at,
-            updated_at: question.updated_at,
+            id: targetQuestion.id,
+            project_id: targetQuestion.project_id,
+            question_number: targetQuestion.question_number,
+            subject: targetQuestion.subject,
+            chapter: targetQuestion.chapter || null,
+            question_text: targetQuestion.question_text,
+            raw_text: targetQuestion.raw_text || null,
+            answer: targetQuestion.answer || null,
+            question_type: targetQuestion.question_type as any,
+            difficulty: targetQuestion.difficulty as any,
+            confidence: targetQuestion.confidence,
+            confidence_breakdown: targetQuestion.confidence_breakdown || {},
+            needs_review: targetQuestion.needs_review,
+            review_reason: targetQuestion.review_reason || null,
+            is_reviewed: targetQuestion.is_reviewed,
+            source_pages: targetQuestion.source_pages,
+            created_at: targetQuestion.created_at,
+            updated_at: targetQuestion.updated_at,
           },
           { onConflict: 'project_id,question_number' }
         )
@@ -414,9 +460,8 @@ export class ProjectStore {
         .single();
 
       if (savedQ) {
-        // Save options
-        if (question.options && question.options.length > 0) {
-          for (const opt of question.options) {
+        if (targetQuestion.options && targetQuestion.options.length > 0) {
+          for (const opt of targetQuestion.options) {
             try {
               await supabase.from('question_options').upsert({
                 id: opt.id,
@@ -425,15 +470,12 @@ export class ProjectStore {
                 text: opt.text,
                 order_index: opt.order_index,
               });
-            } catch {
-              // Continue
-            }
+            } catch {}
           }
         }
 
-        // Save images
-        if (question.images && question.images.length > 0) {
-          for (const img of question.images) {
+        if (targetQuestion.images && targetQuestion.images.length > 0) {
+          for (const img of targetQuestion.images) {
             try {
               await supabase.from('question_images').upsert({
                 id: img.id,
@@ -447,9 +489,7 @@ export class ProjectStore {
                 order_index: img.order_index,
                 source_page: img.source_page || null,
               });
-            } catch {
-              // Continue
-            }
+            } catch {}
           }
         }
       }
@@ -457,7 +497,7 @@ export class ProjectStore {
       console.warn('[ProjectStore] Supabase question save notice:', dbErr);
     }
 
-    return question;
+    return targetQuestion;
   }
 
   /**
