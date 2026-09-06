@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/admin';
+import { createServerSupabaseClient } from '@/lib/supabase/server';
 import { ProjectStore } from '@/lib/projects/store';
+import { verifyServerMasterAdmin } from '@/lib/auth/admin-check';
 
 export async function GET(
   req: NextRequest,
@@ -8,14 +10,25 @@ export async function GET(
 ) {
   try {
     const { id } = await params;
-    const supabase = createAdminClient();
+    const supabaseServer = await createServerSupabaseClient();
 
-    // 1. Fetch project from ProjectStore or Supabase
-    const project = await ProjectStore.getProject(id);
+    // 1. Fetch project using requesting user's Supabase server client (enforcing RLS)
+    let project = await ProjectStore.getProject(id, supabaseServer);
+
+    // 2. If not found via user RLS, check if user is a server-verified Master Admin
+    if (!project) {
+      const isMasterAdmin = await verifyServerMasterAdmin(req);
+      if (isMasterAdmin) {
+        const adminClient = createAdminClient();
+        project = await ProjectStore.getProject(id, adminClient);
+      }
+    }
 
     if (!project) {
       return NextResponse.json({ success: false, error: 'Project not found' }, { status: 404 });
     }
+
+    const supabase = createAdminClient();
 
     // 2. Get latest active processing job if any
     const { data: job } = await supabase

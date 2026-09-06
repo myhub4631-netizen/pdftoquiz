@@ -45,3 +45,5 @@ tmp/
 *.tmp
 supabase/.temp/
 .vercel
+__pycache__/
+*.pyc

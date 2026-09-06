@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import crypto from 'crypto';
 import { ProjectStore } from '@/lib/projects/store';
+import { createServerSupabaseClient } from '@/lib/supabase/server';
 
 export async function GET(req: NextRequest) {
   try {
@@ -13,53 +14,6 @@ export async function GET(req: NextRequest) {
       projectsList = projectsList.filter((p) => p.user_id === userId);
     }
 
-    if (projectsList.length === 0) {
-      projectsList = [
-        {
-          id: 'demo-neet-2024-set-a',
-          user_id: '00000000-0000-0000-0000-000000000001',
-          name: 'NEET 2024 Official Question Paper (Code Q4)',
-          exam_type: 'NEET',
-          year: 2024,
-          description: '200 Questions (Physics, Chemistry, Botany, Zoology) • All Diagrams Extracted',
-          status: 'COMPLETED',
-          expected_questions: 200,
-          extracted_questions: 200,
-          needs_review_count: 3,
-          created_at: new Date(Date.now() - 3600000 * 2).toISOString(),
-          updated_at: new Date(Date.now() - 3600000 * 2).toISOString(),
-        },
-        {
-          id: 'demo-neet-180-set-b',
-          user_id: '00000000-0000-0000-0000-000000000001',
-          name: 'NEET 180 All-India Grand Mock Test 05',
-          exam_type: 'NEET',
-          year: 2025,
-          description: '180 Questions • Permutation: Biology First ➔ Chemistry ➔ Physics',
-          status: 'NEEDS_REVIEW',
-          expected_questions: 180,
-          extracted_questions: 180,
-          needs_review_count: 7,
-          created_at: new Date(Date.now() - 3600000 * 24).toISOString(),
-          updated_at: new Date(Date.now() - 3600000 * 24).toISOString(),
-        },
-        {
-          id: 'demo-jee-main-2024',
-          user_id: '00000000-0000-0000-0000-000000000001',
-          name: 'JEE Main 2024 Session 1 (Shift 2)',
-          exam_type: 'JEE_MAIN',
-          year: 2024,
-          description: '90 Questions • Physics, Chemistry, Mathematics with LaTeX equations',
-          status: 'COMPLETED',
-          expected_questions: 90,
-          extracted_questions: 90,
-          needs_review_count: 0,
-          created_at: new Date(Date.now() - 3600000 * 48).toISOString(),
-          updated_at: new Date(Date.now() - 3600000 * 48).toISOString(),
-        },
-      ];
-    }
-
     return NextResponse.json({ success: true, projects: projectsList });
   } catch (err: any) {
     return NextResponse.json({ success: false, error: err?.message || 'Failed to list projects' }, { status: 500 });
@@ -69,6 +23,8 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   try {
     let body: any = {};
+    const supabaseServer = await createServerSupabaseClient();
+    const { data: { user } } = await supabaseServer.auth.getUser();
 
     const contentType = req.headers.get('content-type') || '';
     if (contentType.includes('multipart/form-data') || contentType.includes('form-data')) {
@@ -98,7 +54,7 @@ export async function POST(req: NextRequest) {
       subject_focus,
       description,
       image_settings,
-      user_id = '00000000-0000-0000-0000-000000000001',
+      user_id,
     } = body;
 
     if (!name) {
@@ -106,7 +62,7 @@ export async function POST(req: NextRequest) {
     }
 
     const expectedQuestions = exam_type === 'NEET' ? 180 : exam_type === 'JEE_MAIN' ? 90 : 100;
-    const targetUserId = user_id || '00000000-0000-0000-0000-000000000001';
+    const targetUserId = user?.id || user_id || '00000000-0000-0000-0000-000000000001';
 
     // ALWAYS generate a REAL UUID for the project
     const realProjectId = crypto.randomUUID();
@@ -135,8 +91,9 @@ export async function POST(req: NextRequest) {
       updated_at: nowIso,
     };
 
-    // Save project using ProjectStore
-    const savedProject = await ProjectStore.saveProject(newProjectRecord);
+    // Save project using ProjectStore (use user session client if authenticated, else admin client for guest projects)
+    const clientToUse = user ? supabaseServer : undefined;
+    const savedProject = await ProjectStore.saveProject(newProjectRecord, clientToUse);
 
     // If storage_path or file_name is present, save document record
     if (body.storage_path || body.file_name) {

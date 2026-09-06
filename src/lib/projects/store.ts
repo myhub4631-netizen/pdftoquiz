@@ -186,75 +186,72 @@ export class ProjectStore {
   /**
    * Saves a project record to Supabase database and local store.
    */
-  static async saveProject(project: ProjectRecord): Promise<ProjectRecord> {
-    const supabase = createAdminClient();
+  static async saveProject(project: ProjectRecord, customClient?: any): Promise<ProjectRecord> {
+    const supabase = customClient || createAdminClient();
 
-    // 1. Always save in memory store for instant retrieval
-    globalProjectsStore.set(project.id, project);
-    this.flushDiskCache(project.id);
+    // Persist to Supabase database
+    const { data, error } = await supabase
+      .from('projects')
+      .insert({
+        id: project.id,
+        user_id: project.user_id,
+        name: project.name,
+        exam_type: project.exam_type as any,
+        year: project.year,
+        subject_focus: project.subject_focus || null,
+        description: project.description || null,
+        status: project.status as any,
+        expected_questions: project.expected_questions,
+        image_settings: project.image_settings || {},
+        created_at: project.created_at,
+        updated_at: project.updated_at,
+      })
+      .select()
+      .single();
 
-    // 2. Persist to Supabase database
-    try {
-      const { data, error } = await supabase
-        .from('projects')
-        .insert({
-          id: project.id,
-          user_id: project.user_id,
-          name: project.name,
-          exam_type: project.exam_type as any,
-          year: project.year,
-          subject_focus: project.subject_focus || null,
-          description: project.description || null,
-          status: project.status as any,
-          expected_questions: project.expected_questions,
-          image_settings: project.image_settings || {},
-          created_at: project.created_at,
-          updated_at: project.updated_at,
-        })
-        .select()
-        .single();
+    if (error) {
+      console.error('[ProjectStore] Supabase DB insert error:', error.message, error.code);
+      throw new Error(`Database project creation failed: ${error.message}`);
+    }
 
-      if (data && !error) {
-        globalProjectsStore.set(data.id, data as any);
-        this.flushDiskCache(data.id);
-        return data as any;
-      }
-    } catch (dbErr) {
-      console.warn('[ProjectStore] Supabase DB insert notice:', dbErr);
+    if (data) {
+      globalProjectsStore.set(data.id, data as any);
+      this.flushDiskCache(data.id);
+      return data as any;
     }
 
     return project;
   }
 
   /**
-   * Retrieves a project by ID from Supabase or local store.
+   * Retrieves a project by ID from Supabase projects table (authoritative source of truth).
    */
-  static async getProject(id: string): Promise<ProjectRecord | null> {
-    this.loadDiskCache(id);
-    const supabase = createAdminClient();
+  static async getProject(id: string, customClient?: any): Promise<ProjectRecord | null> {
+    const supabase = customClient || createAdminClient();
 
-    // 1. Try fetching from Supabase database first
+    // 1. Fetch from Supabase projects table (Authoritative Source of Truth)
     try {
-      const { data: project } = await supabase
+      const { data: project, error } = await supabase
         .from('projects')
         .select('*')
         .eq('id', id)
         .single();
 
-      if (project) {
+      if (project && !error) {
         globalProjectsStore.set(project.id, project as any);
         this.flushDiskCache(project.id);
         return project as any;
       }
     } catch {
-      // Fall through to memory store
+      // Database query failed or unauthenticated
     }
 
-    // 2. Check local store
+    // 2. Check local memory store for previously verified database record in current process
     if (globalProjectsStore.has(id)) {
       return globalProjectsStore.get(id)!;
     }
 
+    // Explicitly return null if project does not exist in authoritative database
     return null;
   }
 
