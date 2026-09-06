@@ -285,11 +285,11 @@ export class ProjectStore {
   /**
    * Saves a document record for a project.
    */
-  static async saveDocument(doc: DocumentRecord): Promise<DocumentRecord> {
+  static async saveDocument(doc: DocumentRecord, customClient?: any): Promise<DocumentRecord> {
     globalDocumentsStore.set(doc.project_id, doc);
     this.flushDiskCache(doc.project_id);
 
-    const supabase = createAdminClient();
+    const supabase = customClient || createAdminClient();
     try {
       const { data } = await supabase.from('documents').upsert(doc as any).select().single();
       if (data) {

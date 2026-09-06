@@ -168,31 +168,56 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: false, error: 'Project name is required', diagnostics }, { status: 400 });
     }
 
-    // Determine target user ID and client
-    let clientToUse: any;
-    let targetUserId: string;
+    // Enforce strict authentication requirement for project creation
+    if (!authUser || !authUser.id) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'Authentication required. Please sign in before creating a project.',
+          diagnostics,
+        },
+        { status: 401 }
+      );
+    }
 
-    if (authUser?.id) {
-      // Authenticated User Flow
-      clientToUse = supabaseServer;
-      targetUserId = authUser.id;
-    } else {
-      // Guest Session Flow: Must use createAdminClient() with SUPABASE_SERVICE_ROLE_KEY
-      clientToUse = createAdminClient(); // Throws clearly if SUPABASE_SERVICE_ROLE_KEY is missing/invalid
-      targetUserId = user_id || '00000000-0000-0000-0000-000000000001';
+    const clientToUse = supabaseServer;
+    const targetUserId = authUser.id;
 
-      // Check if target profile exists
-      try {
-        const { data: profile } = await clientToUse.from('profiles').select('id').eq('id', targetUserId).maybeSingle();
-        if (!profile) {
-          const { data: firstProfile } = await clientToUse.from('profiles').select('id').limit(1).maybeSingle();
-          if (firstProfile?.id) {
-            targetUserId = firstProfile.id;
-          }
+    // Verify & Bootstrap profile for the authenticated user if missing
+    try {
+      const { data: profile } = await clientToUse
+        .from('profiles')
+        .select('id')
+        .eq('id', targetUserId)
+        .maybeSingle();
+
+      if (!profile) {
+        const nowIso = new Date().toISOString();
+        const fullName =
+          authUser.user_metadata?.full_name ||
+          authUser.user_metadata?.name ||
+          authUser.email?.split('@')[0] ||
+          'User';
+
+        const { error: profileErr } = await clientToUse.from('profiles').upsert(
+          {
+            id: targetUserId,
+            email: authUser.email || '',
+            full_name: fullName,
+            avatar_url: authUser.user_metadata?.avatar_url || null,
+            role: 'USER',
+            status: 'ACTIVE',
+            updated_at: nowIso,
+          },
+          { onConflict: 'id' }
+        );
+
+        if (profileErr) {
+          console.warn('[POST /api/projects] Profile bootstrap notice:', profileErr.message);
         }
-      } catch {
-        // Continue
       }
+    } catch (profileErr: any) {
+      console.warn('[POST /api/projects] Profile bootstrap catch notice:', profileErr?.message);
     }
 
     const expectedQuestions = exam_type === 'NEET' ? 180 : exam_type === 'JEE_MAIN' ? 90 : 100;
@@ -227,17 +252,20 @@ export async function POST(req: NextRequest) {
 
     // Save document record if present
     if (body.storage_path || body.file_name) {
-      await ProjectStore.saveDocument({
-        id: crypto.randomUUID(),
-        project_id: realProjectId,
-        user_id: targetUserId,
-        file_name: body.file_name || `${name}.pdf`,
-        file_size_bytes: Number(body.file_size) || 0,
-        mime_type: 'application/pdf',
-        storage_path: body.storage_path || `uploads/${targetUserId}/${realProjectId}/original.pdf`,
-        page_count: 0,
-        created_at: nowIso,
-      });
+      await ProjectStore.saveDocument(
+        {
+          id: crypto.randomUUID(),
+          project_id: realProjectId,
+          user_id: targetUserId,
+          file_name: body.file_name || `${name}.pdf`,
+          file_size_bytes: Number(body.file_size) || 0,
+          mime_type: 'application/pdf',
+          storage_path: body.storage_path || `uploads/${targetUserId}/${realProjectId}/original.pdf`,
+          page_count: 0,
+          created_at: nowIso,
+        },
+        clientToUse
+      );
     }
 
     return NextResponse.json({ success: true, project: savedProject, diagnostics });
