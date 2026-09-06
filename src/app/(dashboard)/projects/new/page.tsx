@@ -176,22 +176,41 @@ export default function NewProjectPage() {
 
       const projectId = data.project.id;
 
-      // Upload PDF in 1.5MB chunks directly to server ProjectStore
+      // Upload PDF in 1.5MB chunks directly to server
       const CHUNK_SIZE = 1.5 * 1024 * 1024; // 1.5 MB
       const arrayBuf = await file.arrayBuffer();
       const totalBytes = arrayBuf.byteLength;
+      const totalChunks = Math.ceil(totalBytes / CHUNK_SIZE);
 
-      for (let offset = 0; offset < totalBytes; offset += CHUNK_SIZE) {
+      for (let offset = 0, chunkIndex = 0; offset < totalBytes; offset += CHUNK_SIZE, chunkIndex++) {
         const chunk = arrayBuf.slice(offset, offset + CHUNK_SIZE);
         const base64Chunk = btoa(
           new Uint8Array(chunk).reduce((data, byte) => data + String.fromCharCode(byte), '')
         );
 
-        await fetch(`/api/projects/${projectId}/upload-chunk`, {
+        const chunkRes = await fetch(`/api/projects/${projectId}/upload-chunk`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ base64Chunk }),
+          body: JSON.stringify({
+            chunkIndex,
+            totalChunks,
+            base64Chunk,
+            fileName: file.name,
+            fileSize: file.size,
+          }),
         });
+
+        const chunkText = await chunkRes.text();
+        let chunkData: any = {};
+        try {
+          chunkData = JSON.parse(chunkText);
+        } catch {
+          throw new Error(`Chunk ${chunkIndex + 1}/${totalChunks} returned status ${chunkRes.status}`);
+        }
+
+        if (!chunkData.success) {
+          throw new Error(chunkData.error || `Chunk ${chunkIndex + 1}/${totalChunks} upload failed`);
+        }
       }
 
       // Trigger parse initiation for the real project UUID

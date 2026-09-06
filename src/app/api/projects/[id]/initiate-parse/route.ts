@@ -22,7 +22,17 @@ export async function POST(
     // 2. Fetch PDF Buffer
     const { buffer: pdfBuffer, fileName, docId } = await PageJobManager.getPdfBufferForProject(id);
 
-    // 3. Extract Page structure & raw text
+    // 3. Validate PDF Binary Integrity
+    if (!pdfBuffer || pdfBuffer.length === 0) {
+      throw new Error('PDF document buffer not found in Supabase Storage.');
+    }
+
+    const headerStr = pdfBuffer.toString('utf8', 0, Math.min(pdfBuffer.length, 10));
+    if (!headerStr.startsWith('%PDF-')) {
+      throw new Error(`Uploaded PDF in Supabase Storage is corrupted or incomplete. (Header: ${headerStr.slice(0, 5)})`);
+    }
+
+    // 4. Extract Page structure & raw text
     const pdfResult = await PDFExtractor.extractTextAndImagesFromBuffer(pdfBuffer);
 
     // 4. Ensure document record exists
