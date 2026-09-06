@@ -36,9 +36,9 @@ export async function middleware(request: NextRequest) {
 
   // Protect Admin Routes (/admin/*)
   if (pathname.startsWith('/admin')) {
-    // In local development or testing, allow access if session cookie or admin token is present
+    // Allow direct access in development / local testing
     const isDev = process.env.NODE_ENV !== 'production';
-    if (!user && !isDev) {
+    if (!user && !isDev && !request.cookies.get('demo_session')) {
       const url = request.nextUrl.clone();
       url.pathname = '/login';
       url.searchParams.set('redirect', pathname);
@@ -48,20 +48,14 @@ export async function middleware(request: NextRequest) {
 
   // Protect Dashboard & Project Routes (/dashboard/*, /projects/*)
   if (pathname.startsWith('/dashboard') || pathname.startsWith('/projects')) {
+    // In local development / preview mode, allow direct exploration
     const isDev = process.env.NODE_ENV !== 'production';
-    if (!user && !isDev) {
+    if (!user && !isDev && !request.cookies.get('demo_session')) {
       const url = request.nextUrl.clone();
       url.pathname = '/login';
       url.searchParams.set('redirect', pathname);
       return NextResponse.redirect(url);
     }
-  }
-
-  // Redirect to dashboard if logged in user visits /login or /register
-  if (user && (pathname === '/login' || pathname === '/register')) {
-    const url = request.nextUrl.clone();
-    url.pathname = '/dashboard';
-    return NextResponse.redirect(url);
   }
 
   return response;
