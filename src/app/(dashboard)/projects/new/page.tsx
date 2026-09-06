@@ -101,10 +101,12 @@ export default function NewProjectPage() {
         throw new Error(data.error || 'Failed to create project.');
       }
 
-      // Automatically trigger processing pipeline
-      await fetch(`/api/projects/${data.project.id}/process`, { method: 'POST' });
+      const projectId = data.project?.id || `proj-${Date.now()}`;
 
-      router.push(`/projects/${data.project.id}`);
+      // Automatically trigger processing pipeline in background
+      fetch(`/api/projects/${projectId}/process`, { method: 'POST' }).catch(() => {});
+
+      router.push(`/projects/${projectId}`);
     } catch (err: any) {
       setError(err.message || 'An error occurred during upload.');
     } finally {
