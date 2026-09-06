@@ -68,12 +68,16 @@ class PDFExtractorService:
 
         # 3. Extract Embedded XObject Images & Vector Path Crops with Deterministic Spatial Association
         extracted_images = []
-        raster_count = 0
-        vector_obj_count = 0
-        vector_diagram_count = 0
+        raster_xobjects_count = 0
+        raster_valid_bbox_count = 0
+        vector_objects_count = 0
+        vector_clusters_count = 0
+        vector_crops_count = 0
+        mapped_count = 0
+        unmapped_count = 0
 
         if extract_images:
-            raw_extracted, raster_count, vector_obj_count, vector_diagram_count = cls._extract_page_images_and_drawings(
+            raw_extracted, raster_xobjects_count, raster_valid_bbox_count, vector_objects_count, vector_clusters_count, vector_crops_count = cls._extract_page_images_and_drawings(
                 doc, page, page_number, dpi, page_width, page_height
             )
 
@@ -89,6 +93,11 @@ class PDFExtractorService:
                 img["confidence"] = assoc["confidence"]
                 img["unmapped_reason"] = assoc["unmapped_reason"]
 
+                if assoc["target_type"] in ("question", "option", "standalone_diagram"):
+                    mapped_count += 1
+                else:
+                    unmapped_count += 1
+
                 extracted_images.append(img)
 
         doc.close()
@@ -97,6 +106,8 @@ class PDFExtractorService:
         last_q_num = prev_last_question
         if question_boundaries:
             last_q_num = max(qb["question_number"] for qb in question_boundaries)
+
+        total_visual_elements = raster_valid_bbox_count + vector_crops_count
 
         return {
             "success": True,
@@ -110,10 +121,15 @@ class PDFExtractorService:
             "question_boundaries": question_boundaries,
             "images": extracted_images,
             "diagnostics": {
-                "raster_images_count": raster_count,
-                "vector_objects_count": vector_obj_count,
-                "vector_diagrams_count": vector_diagram_count,
-                "total_images_extracted": len(extracted_images),
+                "raster_xobjects_count": raster_xobjects_count,
+                "raster_valid_bbox_count": raster_valid_bbox_count,
+                "vector_objects_count": vector_objects_count,
+                "vector_diagram_clusters_count": vector_clusters_count,
+                "vector_diagram_crops_count": vector_crops_count,
+                "total_visual_elements": total_visual_elements,
+                "mapped_visual_elements": mapped_count,
+                "unmapped_visual_elements": unmapped_count,
+                "conservation_check_pass": total_visual_elements == (mapped_count + unmapped_count),
                 "last_question_number": last_q_num
             }
         }
@@ -190,20 +206,33 @@ class PDFExtractorService:
     ) -> List[Dict[str, Any]]:
         """
         Locates (A), (B), (C), (D) option labels within vertical boundaries.
+        Computes sub-bounding box coordinates for options sharing a single text block line.
         """
-        opt_regex = re.compile(r"(?:^|\s{2,})(?:\(([A-D1-4])\)|([A-D1-4])[\.\:\)])\s*", re.IGNORECASE)
+        opt_regex = re.compile(r"(?:^|\s{2,}|\b)\(([A-D])\)|(?:^|\s{2,})\b([A-D])[\.\:\)]\s+", re.IGNORECASE)
         option_bounds = []
 
         for block in text_blocks:
             if start_y <= block["y0"] < end_y:
-                for m in opt_regex.finditer(block["text"]):
+                b_text = block["text"]
+                b_len = max(len(b_text), 1)
+                b_width = max(block["x1"] - block["x0"], 10.0)
+                matches = list(opt_regex.finditer(b_text))
+
+                for idx, m in enumerate(matches):
                     label = (m.group(1) or m.group(2)).upper()
                     mapped_label = "A" if label == "1" else "B" if label == "2" else "C" if label == "3" else "D" if label == "4" else label
+
+                    start_char = m.start()
+                    next_char = matches[idx + 1].start() if idx + 1 < len(matches) else len(b_text)
+
+                    opt_x0 = block["x0"] + (start_char / b_len) * b_width
+                    opt_x1 = block["x0"] + (next_char / b_len) * b_width
+
                     option_bounds.append({
                         "label": mapped_label,
-                        "x0": block["x0"],
+                        "x0": round(opt_x0, 2),
                         "y0": block["y0"],
-                        "x1": block["x1"],
+                        "x1": round(opt_x1, 2),
                         "y1": block["y1"]
                     })
 
@@ -218,19 +247,23 @@ class PDFExtractorService:
         dpi: int,
         page_width: float,
         page_height: float
-    ) -> Tuple[List[Dict[str, Any]], int, int, int]:
+    ) -> Tuple[List[Dict[str, Any]], int, int, int, int, int]:
         """
         Extracts raster XObject image streams and vector drawing path bounding boxes.
-        Returns: (extracted_images_list, raster_count, vector_obj_count, vector_diagram_count)
+        Returns: (extracted_images_list, raster_xobjects_count, raster_valid_bbox_count, vector_objects_count, vector_clusters_count, vector_crops_count)
         """
         extracted = []
         img_counter = 1
-        raster_count = 0
-        vector_obj_count = 0
-        vector_diagram_count = 0
+        raster_xobjects_count = 0
+        raster_valid_bbox_count = 0
+        vector_objects_count = 0
+        vector_clusters_count = 0
+        vector_crops_count = 0
 
         # 1. Raster XObjects
         image_list = page.get_images(full=True)
+        raster_xobjects_count = len(image_list)
+
         for img_info in image_list:
             xref = img_info[0]
             try:
@@ -250,8 +283,12 @@ class PDFExtractorService:
                     rects = page.get_image_rects(xref)
                     img_bbox = rects[0] if rects else fitz.Rect(0, 0, width, height)
 
+                    visual_id = f"visual_p{page_number}_{img_counter:04d}"
                     extracted.append({
-                        "image_id": f"img_p{page_number}_{img_counter}",
+                        "visual_id": visual_id,
+                        "image_id": visual_id,
+                        "type": "raster_image",
+                        "page_number": page_number,
                         "x0": round(img_bbox.x0, 2),
                         "y0": round(img_bbox.y0, 2),
                         "x1": round(img_bbox.x1, 2),
@@ -260,10 +297,11 @@ class PDFExtractorService:
                         "height": height,
                         "format": image_ext,
                         "image_base64": b64_data,
-                        "is_vector_crop": False
+                        "is_vector_crop": False,
+                        "parent_element_id": f"xobject_xref_{xref}"
                     })
                     img_counter += 1
-                    raster_count += 1
+                    raster_valid_bbox_count += 1
             except Exception:
                 pass
 
@@ -271,7 +309,7 @@ class PDFExtractorService:
         try:
             drawings = page.get_drawings()
             if drawings:
-                vector_obj_count = len(drawings)
+                vector_objects_count = len(drawings)
                 clusters = []
 
                 for d in drawings:
@@ -299,15 +337,21 @@ class PDFExtractorService:
                     if not merged:
                         clusters.append(fitz.Rect(r))
 
+                vector_clusters_count = len(clusters)
+
                 # Process meaningful vector diagram bounding box clusters
-                for c_rect in clusters:
+                for idx, c_rect in enumerate(clusters, 1):
                     if c_rect.width >= 35 and c_rect.height >= 35:
                         pix = page.get_pixmap(dpi=dpi, clip=c_rect)
                         img_bytes = pix.tobytes("png")
                         b64_data = "data:image/png;base64," + base64.b64encode(img_bytes).decode("utf-8")
 
+                        visual_id = f"visual_p{page_number}_{img_counter:04d}"
                         extracted.append({
-                            "image_id": f"vec_p{page_number}_{img_counter}",
+                            "visual_id": visual_id,
+                            "image_id": visual_id,
+                            "type": "vector_diagram",
+                            "page_number": page_number,
                             "x0": round(c_rect.x0, 2),
                             "y0": round(c_rect.y0, 2),
                             "x1": round(c_rect.x1, 2),
@@ -316,11 +360,12 @@ class PDFExtractorService:
                             "height": pix.height,
                             "format": "png",
                             "image_base64": b64_data,
-                            "is_vector_crop": True
+                            "is_vector_crop": True,
+                            "parent_element_id": f"vector_cluster_p{page_number}_{idx}"
                         })
                         img_counter += 1
-                        vector_diagram_count += 1
+                        vector_crops_count += 1
         except Exception:
             pass
 
-        return extracted, raster_count, vector_obj_count, vector_diagram_count
+        return extracted, raster_xobjects_count, raster_valid_bbox_count, vector_objects_count, vector_clusters_count, vector_crops_count

@@ -13,7 +13,6 @@ class SpatialAssociator:
     def calculate_bounding_box_overlap(box1: Dict[str, float], box2: Dict[str, float]) -> float:
         """
         Calculates Intersection-over-Area ratio for box1 relative to box2.
-        Box format: {'x0': float, 'y0': float, 'x1': float, 'y1': float}
         """
         x_left = max(box1['x0'], box2['x0'])
         y_top = max(box1['y0'], box2['y0'])
@@ -25,8 +24,12 @@ class SpatialAssociator:
 
         intersection_area = (x_right - x_left) * (y_bottom - y_top)
         box1_area = (box1['x1'] - box1['x0']) * (box1['y1'] - box1['y0'])
+        box2_area = (box2['x1'] - box2['x0']) * (box2['y1'] - box2['y0'])
 
-        return intersection_area / box1_area if box1_area > 0 else 0.0
+        ratio1 = intersection_area / box1_area if box1_area > 0 else 0.0
+        ratio2 = intersection_area / box2_area if box2_area > 0 else 0.0
+
+        return max(ratio1, ratio2)
 
     @classmethod
     def associate_image_to_question_or_option(
@@ -58,6 +61,7 @@ class SpatialAssociator:
         img_y0 = image_box["y0"]
         img_y1 = image_box["y1"]
         img_mid_y = (img_y0 + img_y1) / 2.0
+        img_mid_x = (image_box["x0"] + image_box["x1"]) / 2.0
 
         # Ignore header/footer margin images (y < 35 or y > page_height - 35)
         if img_y1 < 35 or img_y0 > (page_height - 35):
@@ -70,7 +74,7 @@ class SpatialAssociator:
                 "unmapped_reason": "page_header_footer_margin"
             }
 
-        # 1. Find containing question boundary (where img_mid_y falls within question y0 and y1)
+        # 1. Find containing question boundary
         matching_q = None
         for qb in question_boundaries:
             if qb["y0"] - 15 <= img_mid_y <= qb["y1"] + 15:
@@ -99,7 +103,6 @@ class SpatialAssociator:
         q_num = matching_q["question_number"]
         option_bounds = matching_q.get("option_bounds", [])
 
-        # If no options detected in question boundary -> Question Stem diagram
         if not option_bounds:
             return {
                 "question_number": q_num,
@@ -110,11 +113,37 @@ class SpatialAssociator:
                 "unmapped_reason": None
             }
 
-        # Find top Y coordinate of the first option label
-        first_opt_y0 = min(opt["y0"] for opt in option_bounds)
+        # 2. Check 2D bounding box overlap & Euclidean distance proximity to option labels
+        best_label = None
+        max_score = -1.0
 
-        # 2. If image is physically situated above option labels -> Question Stem Diagram
-        if img_y1 <= first_opt_y0 + 10:
+        for opt in option_bounds:
+            overlap = cls.calculate_bounding_box_overlap(image_box, opt)
+            
+            opt_mid_x = (opt["x0"] + opt["x1"]) / 2.0
+            x_dist = abs(img_mid_x - opt_mid_x)
+            y_dist = abs(img_y0 - opt["y1"]) if img_y0 >= opt["y1"] else abs(opt["y0"] - img_y1)
+            
+            dist = (x_dist ** 2 + y_dist ** 2) ** 0.5
+            
+            score = overlap + max(0.0, 1.0 - (dist / 150.0))
+
+            if score > max_score:
+                max_score = score
+                best_label = opt.get("label")
+
+        if best_label and max_score >= 0.35:
+            return {
+                "question_number": q_num,
+                "target_type": "option",
+                "option": best_label,
+                "association_method": "geometric",
+                "confidence": round(min(0.85 + (max_score * 0.08), 0.98), 2),
+                "unmapped_reason": None
+            }
+
+        first_opt_y0 = min(opt["y0"] for opt in option_bounds)
+        if image_box["y1"] <= first_opt_y0 + 5:
             return {
                 "question_number": q_num,
                 "target_type": "question",
@@ -124,39 +153,6 @@ class SpatialAssociator:
                 "unmapped_reason": None
             }
 
-        # 3. Check exact 2D bounding box overlap with option rectangles
-        best_label = None
-        max_overlap = 0.0
-
-        for opt in option_bounds:
-            overlap = cls.calculate_bounding_box_overlap(image_box, opt)
-            if overlap > max_overlap:
-                max_overlap = overlap
-                best_label = opt.get("label")
-
-        if best_label and max_overlap >= 0.15:
-            return {
-                "question_number": q_num,
-                "target_type": "option",
-                "option": best_label,
-                "association_method": "geometric",
-                "confidence": round(0.85 + (max_overlap * 0.14), 2),
-                "unmapped_reason": None
-            }
-
-        # 4. Fallback based on mid-point Y matching option Y-interval
-        for opt in option_bounds:
-            if opt["y0"] - 5 <= img_mid_y <= opt["y1"] + 5:
-                return {
-                    "question_number": q_num,
-                    "target_type": "option",
-                    "option": opt.get("label"),
-                    "association_method": "geometric",
-                    "confidence": 0.88,
-                    "unmapped_reason": None
-                }
-
-        # Default fallback to question stem
         return {
             "question_number": q_num,
             "target_type": "question",
