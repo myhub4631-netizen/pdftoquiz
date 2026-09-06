@@ -45,7 +45,10 @@ export class PDFExtractor {
     try {
       const res = await fetch(`${pythonUrl}/api/v1/extract-page`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'bypass-tunnel-reminder': 'true'
+        },
         body: JSON.stringify({
           pdf_base64: buffer.toString('base64'),
           page_number: pageNumber,
