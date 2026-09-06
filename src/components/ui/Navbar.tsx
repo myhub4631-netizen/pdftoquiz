@@ -1,13 +1,38 @@
 'use client';
 
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { FileSpreadsheet, ShieldAlert, Sparkles, FolderKanban, PlusCircle, LayoutDashboard } from 'lucide-react';
+import { createClient } from '@/lib/supabase/client';
+import { FileSpreadsheet, ShieldAlert, Sparkles, FolderKanban, PlusCircle, LayoutDashboard, LogOut, LogIn, User } from 'lucide-react';
 
 export function Navbar() {
   const pathname = usePathname();
   const isAdmin = pathname?.startsWith('/admin');
+  const [authUser, setAuthUser] = useState<any>(null);
+
+  useEffect(() => {
+    async function getAuth() {
+      try {
+        const supabase = createClient();
+        const { data } = await supabase.auth.getUser();
+        if (data?.user) setAuthUser(data.user);
+      } catch {
+        // Unauthenticated
+      }
+    }
+    getAuth();
+  }, []);
+
+  async function handleSignOut() {
+    try {
+      const supabase = createClient();
+      await supabase.auth.signOut();
+    } catch {
+      // Continue
+    }
+    window.location.href = '/login';
+  }
 
   return (
     <header className="sticky top-0 z-40 w-full border-b border-slate-800/80 bg-slate-950/80 backdrop-blur-xl">
@@ -70,13 +95,30 @@ export function Navbar() {
             <span>Master Admin</span>
           </Link>
 
-          <Link
-            href="/projects/new"
-            className="hidden sm:flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-blue-600 text-white hover:bg-blue-500 shadow-glow transition-all"
-          >
-            <Sparkles className="h-3.5 w-3.5" />
-            <span>Upload PDF</span>
-          </Link>
+          {authUser ? (
+            <div className="flex items-center gap-2">
+              <span className="hidden lg:flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium bg-slate-900 border border-slate-800 text-slate-300">
+                <User className="h-3.5 w-3.5 text-blue-400" />
+                <span>{authUser.email}</span>
+              </span>
+              <button
+                onClick={handleSignOut}
+                title="Sign Out"
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-900 text-slate-300 border border-slate-800 hover:bg-slate-800 hover:text-white transition-all"
+              >
+                <LogOut className="h-3.5 w-3.5 text-rose-400" />
+                <span className="hidden sm:inline">Sign Out</span>
+              </button>
+            </div>
+          ) : (
+            <Link
+              href="/login"
+              className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-blue-600 text-white hover:bg-blue-500 shadow-glow transition-all"
+            >
+              <LogIn className="h-3.5 w-3.5" />
+              <span>Sign In</span>
+            </Link>
+          )}
         </div>
       </div>
     </header>

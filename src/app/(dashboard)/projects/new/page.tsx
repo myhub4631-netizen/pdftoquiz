@@ -21,6 +21,10 @@ export default function NewProjectPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Auth Session State
+  const [authUser, setAuthUser] = useState<any>(null);
+  const [authChecking, setAuthChecking] = useState(true);
+
   // Form State
   const [name, setName] = useState('');
   const [examType, setExamType] = useState('NEET');
@@ -35,6 +39,27 @@ export default function NewProjectPage() {
   const [compressionLevel, setCompressionLevel] = useState<'Original' | 'Low' | 'Medium' | 'High' | 'Maximum'>('Medium');
   const [convertToSvg, setConvertToSvg] = useState(false);
   const [keepOriginal, setKeepOriginal] = useState(false);
+
+  async function checkAuthSession() {
+    setAuthChecking(true);
+    try {
+      const supabase = createClient();
+      const { data } = await supabase.auth.getUser();
+      if (data?.user) {
+        setAuthUser(data.user);
+      } else {
+        setAuthUser(null);
+      }
+    } catch {
+      setAuthUser(null);
+    } finally {
+      setAuthChecking(false);
+    }
+  }
+
+  React.useEffect(() => {
+    checkAuthSession();
+  }, []);
 
   function validateFile(selected: File): boolean {
     if (selected.type !== 'application/pdf' && !selected.name.toLowerCase().endsWith('.pdf')) {
@@ -196,12 +221,59 @@ export default function NewProjectPage() {
         </p>
       </div>
 
-      {error && (
-        <div className="p-4 rounded-xl bg-rose-950/40 border border-rose-500/30 text-rose-300 text-xs flex items-center gap-2">
-          <AlertCircle className="h-4 w-4 text-rose-400 shrink-0" />
-          <span>{error}</span>
+      {authChecking ? (
+        <div className="glass-card rounded-2xl p-8 text-center space-y-3">
+          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-blue-600/20 text-blue-400 mx-auto animate-pulse">
+            <Sparkles className="h-5 w-5" />
+          </div>
+          <p className="text-xs text-slate-400 font-medium">Verifying Supabase authentication session...</p>
         </div>
-      )}
+      ) : !authUser ? (
+        <div className="glass-card rounded-2xl p-8 text-center space-y-4 border border-rose-500/20 bg-rose-950/10">
+          <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-rose-500/10 text-rose-400 border border-rose-500/20 mx-auto">
+            <AlertCircle className="h-6 w-6" />
+          </div>
+          <div className="space-y-1.5 max-w-md mx-auto">
+            <h2 className="text-base font-bold text-white">Authentication Required</h2>
+            <p className="text-xs text-slate-300">
+              Please sign in with your Supabase Auth account or Master Admin credentials before creating a project.
+            </p>
+          </div>
+          <div className="flex items-center justify-center gap-3 pt-2">
+            <button
+              onClick={() => router.push('/login')}
+              className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white text-xs font-semibold shadow-glow transition-all flex items-center gap-2"
+            >
+              <span>Sign In / Master Admin Login</span>
+              <ArrowRight className="h-4 w-4" />
+            </button>
+            <button
+              onClick={checkAuthSession}
+              className="px-4 py-2.5 rounded-xl bg-slate-900 border border-slate-800 hover:bg-slate-800 text-slate-300 text-xs font-medium transition-all"
+            >
+              Refresh Session
+            </button>
+          </div>
+        </div>
+      ) : (
+        <>
+          {/* Authenticated Identity Banner */}
+          <div className="p-3.5 rounded-xl bg-blue-950/40 border border-blue-500/20 text-xs text-blue-300 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0" />
+              <span>Authenticated Session: <strong className="text-white font-medium">{authUser.email}</strong></span>
+            </div>
+            <span className="font-mono text-[10px] text-blue-400 bg-blue-500/10 px-2.5 py-0.5 rounded border border-blue-500/20">
+              UUID: {authUser.id.slice(0, 8)}...
+            </span>
+          </div>
+
+          {error && (
+            <div className="p-4 rounded-xl bg-rose-950/40 border border-rose-500/30 text-rose-300 text-xs flex items-center gap-2">
+              <AlertCircle className="h-4 w-4 text-rose-400 shrink-0" />
+              <span>{error}</span>
+            </div>
+          )}
 
       <form onSubmit={handleSubmit} className="space-y-8">
         {/* Step 1: File Upload Dropzone */}
@@ -426,6 +498,8 @@ export default function NewProjectPage() {
           </button>
         </div>
       </form>
-    </div>
+    </>
+  )}
+</div>
   );
 }
