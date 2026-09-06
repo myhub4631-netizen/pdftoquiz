@@ -195,10 +195,18 @@ export default function NewProjectPage() {
       }
 
       // Trigger parse initiation for the real project UUID
-      await fetch(`/api/projects/${projectId}/initiate-parse`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-      }).catch(() => {});
+      try {
+        const initRes = await fetch(`/api/projects/${projectId}/initiate-parse`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+        });
+        const initData = await initRes.json();
+        if (!initData.success) {
+          console.warn('[new/page] Initiate parse notice:', initData.error);
+        }
+      } catch (parseErr) {
+        console.warn('[new/page] Initiate parse catch notice:', parseErr);
+      }
 
       router.push(`/projects/${projectId}`);
     } catch (err: any) {
