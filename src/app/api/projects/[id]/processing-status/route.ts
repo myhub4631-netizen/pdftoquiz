@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { PageJobManager } from '@/lib/processing/page-job-manager';
+import { ProjectStore } from '@/lib/projects/store';
 
 export async function GET(
   req: NextRequest,
@@ -10,23 +11,14 @@ export async function GET(
     const { id } = await params;
     const supabase = createAdminClient();
 
-    // 1. Fetch Project
-    const { data: project, error: pErr } = await supabase
-      .from('projects')
-      .select('*')
-      .eq('id', id)
-      .single();
+    // 1. Fetch Project via ProjectStore
+    const project = await ProjectStore.getProject(id);
 
-    if (pErr || !project) {
+    if (!project) {
       return NextResponse.json({ success: false, error: 'Project not found' }, { status: 404 });
     }
 
-    const { data: doc } = await supabase
-      .from('documents')
-      .select('*')
-      .eq('project_id', id)
-      .limit(1)
-      .maybeSingle();
+    const doc = await ProjectStore.getDocument(id);
 
     if (!doc) {
       return NextResponse.json({
@@ -47,13 +39,18 @@ export async function GET(
     }
 
     // 2. Fetch all document_pages records
-    const { data: pageRows } = await supabase
-      .from('document_pages')
-      .select('*')
-      .eq('document_id', doc.id)
-      .order('page_number', { ascending: true });
+    let rawPages: any[] = [];
+    try {
+      const { data: pageRows } = await supabase
+        .from('document_pages')
+        .select('*')
+        .eq('document_id', doc.id)
+        .order('page_number', { ascending: true });
+      rawPages = pageRows || [];
+    } catch {
+      rawPages = [];
+    }
 
-    const rawPages = pageRows || [];
     const totalPages = rawPages.length || doc.page_count || 1;
 
     let completedPages = 0;
@@ -108,7 +105,7 @@ export async function GET(
       progressPercentage,
       totalQuestionsDetected,
       totalImagesDetected,
-      firstIncompletePage,
+      firstIncompletePage: firstIncompletePage !== null ? firstIncompletePage : (completedPages < totalPages ? completedPages + 1 : null),
       pages: pageMatrix,
     });
   } catch (err: any) {

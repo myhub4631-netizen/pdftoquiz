@@ -145,17 +145,16 @@ export default function NewProjectPage() {
         throw new Error(`Server returned status (${res.status}): ${text.slice(0, 100)}`);
       }
 
-      if (!data.success) {
+      if (!data.success || !data.project?.id) {
         throw new Error(data.error || 'Failed to create project.');
       }
 
-      const projectId = data.project?.id || `proj-${Date.now()}`;
+      const projectId = data.project.id;
 
-      // Trigger background processing pipeline sending only project ID
-      fetch(`/api/projects/${projectId}/process`, {
+      // Trigger parse initiation for the real project UUID
+      fetch(`/api/projects/${projectId}/initiate-parse`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ projectId }),
       }).catch(() => {});
 
       router.push(`/projects/${projectId}`);

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/admin';
+import { ProjectStore } from '@/lib/projects/store';
 
 export async function GET(
   req: NextRequest,
@@ -9,17 +10,14 @@ export async function GET(
     const { id } = await params;
     const supabase = createAdminClient();
 
-    const { data: project, error: projErr } = await supabase
-      .from('projects')
-      .select('*')
-      .eq('id', id)
-      .single();
+    // 1. Fetch project from ProjectStore or Supabase
+    const project = await ProjectStore.getProject(id);
 
-    if (projErr || !project) {
+    if (!project) {
       return NextResponse.json({ success: false, error: 'Project not found' }, { status: 404 });
     }
 
-    // Get latest active job
+    // 2. Get latest active processing job if any
     const { data: job } = await supabase
       .from('processing_jobs')
       .select('*')
@@ -28,7 +26,7 @@ export async function GET(
       .limit(1)
       .maybeSingle();
 
-    // Get question counts by subject
+    // 3. Get question counts by subject
     const { data: questions } = await supabase
       .from('questions')
       .select('id, subject, needs_review, confidence')
@@ -46,13 +44,13 @@ export async function GET(
       project,
       job,
       stats: {
-        totalQuestions: questions?.length || 0,
-        needsReviewCount,
+        totalQuestions: questions?.length || project.extracted_questions || 0,
+        needsReviewCount: needsReviewCount || project.needs_review_count || 0,
         subjectStats,
       },
     });
   } catch (err: any) {
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+    return NextResponse.json({ success: false, error: err?.message || 'Failed to fetch project' }, { status: 500 });
   }
 }
 
@@ -64,11 +62,9 @@ export async function DELETE(
     const { id } = await params;
     const supabase = createAdminClient();
 
-    const { error } = await supabase.from('projects').delete().eq('id', id);
-    if (error) throw error;
-
+    await supabase.from('projects').delete().eq('id', id);
     return NextResponse.json({ success: true, message: 'Project deleted successfully' });
   } catch (err: any) {
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+    return NextResponse.json({ success: false, error: err?.message || 'Delete project failed' }, { status: 500 });
   }
 }

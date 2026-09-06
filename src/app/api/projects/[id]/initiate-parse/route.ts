@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { PDFExtractor } from '@/lib/pdf/extractor';
 import { PageJobManager } from '@/lib/processing/page-job-manager';
+import { ProjectStore } from '@/lib/projects/store';
 
 export async function POST(
   req: NextRequest,
@@ -11,14 +12,10 @@ export async function POST(
     const { id } = await params;
     const supabase = createAdminClient();
 
-    // 1. Fetch Project
-    const { data: project, error: pErr } = await supabase
-      .from('projects')
-      .select('*')
-      .eq('id', id)
-      .single();
+    // 1. Fetch Project via ProjectStore
+    const project = await ProjectStore.getProject(id);
 
-    if (pErr || !project) {
+    if (!project) {
       return NextResponse.json({ success: false, error: 'Project not found' }, { status: 404 });
     }
 
@@ -29,20 +26,18 @@ export async function POST(
     const pdfResult = await PDFExtractor.extractTextAndImagesFromBuffer(pdfBuffer);
 
     // 4. Ensure document record exists
-    const { data: documentRecord } = await supabase
-      .from('documents')
-      .upsert({
-        project_id: id,
-        user_id: project.user_id,
-        file_name: fileName,
-        file_size_bytes: pdfBuffer.length,
-        mime_type: 'application/pdf',
-        storage_path: `uploads/${project.user_id}/${id}/original.pdf`,
-        page_count: pdfResult.totalPages,
-        extracted_text_size: pdfResult.fullText.length,
-      }, { onConflict: 'id' })
-      .select()
-      .single();
+    const documentRecord = await ProjectStore.saveDocument({
+      id: docId,
+      project_id: id,
+      user_id: project.user_id,
+      file_name: fileName,
+      file_size_bytes: pdfBuffer.length,
+      mime_type: 'application/pdf',
+      storage_path: `uploads/${project.user_id}/${id}/original.pdf`,
+      page_count: pdfResult.totalPages,
+      extracted_text_size: pdfResult.fullText.length,
+      created_at: new Date().toISOString(),
+    });
 
     const targetDocId = documentRecord?.id || docId;
 
@@ -68,20 +63,18 @@ export async function POST(
     }
 
     // Delete old document pages if re-initiating
-    await supabase.from('document_pages').delete().eq('document_id', targetDocId);
-
-    // Bulk insert queued pages
-    const { error: pageInsErr } = await supabase.from('document_pages').insert(initialPages);
-    if (pageInsErr) {
-      console.warn('[initiate-parse] Page insert warning:', pageInsErr.message);
+    try {
+      await supabase.from('document_pages').delete().eq('document_id', targetDocId);
+      await supabase.from('document_pages').insert(initialPages);
+    } catch (e) {
+      console.warn('[initiate-parse] Page insert notice:', e);
     }
 
     // 6. Update Project status to EXTRACTING & record page count
-    await supabase.from('projects').update({
+    await ProjectStore.updateProject(id, {
       status: 'EXTRACTING',
       total_pages: pdfResult.totalPages,
-      updated_at: new Date().toISOString(),
-    }).eq('id', id);
+    });
 
     return NextResponse.json({
       success: true,

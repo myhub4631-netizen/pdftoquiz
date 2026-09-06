@@ -44,3 +44,4 @@ scratch/
 tmp/
 *.tmp
 supabase/.temp/
+.vercel

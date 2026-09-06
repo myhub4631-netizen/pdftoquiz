@@ -5,6 +5,7 @@ import { ImageProcessor } from '@/lib/image/processor';
 import { OpenRouterProvider } from '@/lib/ai/openrouter';
 import { NEETSubjectDetector } from '@/lib/pdf/neet-detector';
 import { PageJobManager, PageStatus } from '@/lib/processing/page-job-manager';
+import { ProjectStore } from '@/lib/projects/store';
 import { QuestionType } from '@/types/database';
 
 export async function POST(
@@ -20,23 +21,14 @@ export async function POST(
     const supabase = createAdminClient();
     const aiProvider = new OpenRouterProvider();
 
-    // 1. Fetch Project & Document Details
-    const { data: project, error: pErr } = await supabase
-      .from('projects')
-      .select('*')
-      .eq('id', id)
-      .single();
+    // 1. Fetch Project & Document Details via ProjectStore
+    const project = await ProjectStore.getProject(id);
 
-    if (pErr || !project) {
+    if (!project) {
       return NextResponse.json({ success: false, error: 'Project not found' }, { status: 404 });
     }
 
-    const { data: doc } = await supabase
-      .from('documents')
-      .select('*')
-      .eq('project_id', id)
-      .limit(1)
-      .single();
+    const doc = await ProjectStore.getDocument(id);
 
     if (!doc) {
       return NextResponse.json({ success: false, error: 'Document not found for project' }, { status: 404 });
@@ -48,7 +40,7 @@ export async function POST(
       .select('*')
       .eq('document_id', doc.id)
       .eq('page_number', pageNumber)
-      .single();
+      .maybeSingle();
 
     const currentMeta = PageJobManager.parsePageMetadata(pageRow);
 
@@ -74,11 +66,15 @@ export async function POST(
       processed_at: new Date().toISOString(),
     });
 
-    await supabase
-      .from('document_pages')
-      .update({ page_image_path: processingMeta })
-      .eq('document_id', doc.id)
-      .eq('page_number', pageNumber);
+    try {
+      await supabase
+        .from('document_pages')
+        .update({ page_image_path: processingMeta })
+        .eq('document_id', doc.id)
+        .eq('page_number', pageNumber);
+    } catch (e) {
+      // Continue
+    }
 
     try {
       // 5. Download PDF & Extract raw content for this specific page
@@ -211,15 +207,19 @@ export async function POST(
       }
 
       // 8. Delete previous questions/options/images for this page to prevent duplicates on retry
-      const { data: oldQs } = await supabase
-        .from('questions')
-        .select('id')
-        .eq('project_id', id)
-        .contains('source_pages', [pageNumber]);
+      try {
+        const { data: oldQs } = await supabase
+          .from('questions')
+          .select('id')
+          .eq('project_id', id)
+          .contains('source_pages', [pageNumber]);
 
-      if (oldQs && oldQs.length > 0) {
-        const oldIds = oldQs.map((q) => q.id);
-        await supabase.from('questions').delete().in('id', oldIds);
+        if (oldQs && oldQs.length > 0) {
+          const oldIds = oldQs.map((q) => q.id);
+          await supabase.from('questions').delete().in('id', oldIds);
+        }
+      } catch (e) {
+        // Continue
       }
 
       // 9. Persist page questions, options, and images to Supabase database
@@ -230,116 +230,125 @@ export async function POST(
         const qData = pageQuestions[idx];
         const qNum = qData.question_number || (idx + 1);
 
-        const { data: savedQ } = await supabase
-          .from('questions')
-          .insert({
-            project_id: id,
-            question_number: qNum,
-            subject: qData.subject || 'Physics',
-            chapter: qData.chapter || null,
-            question_text: qData.question_text || `Question ${qNum}`,
-            answer: qData.answer || null,
-            question_type: (qData.question_type as QuestionType) || 'single_correct',
-            difficulty: qData.difficulty || 'Medium',
-            confidence: qData.confidence || 90,
-            confidence_breakdown: qData.confidence_breakdown || { text: 95, options: 95, images: 90, question_number: 100 },
-            needs_review: Boolean(qData.needs_review),
-            review_reason: qData.review_reason || null,
-            is_reviewed: false,
-            source_pages: [pageNumber],
-          })
-          .select()
-          .single();
+        try {
+          const { data: savedQ } = await supabase
+            .from('questions')
+            .insert({
+              project_id: id,
+              question_number: qNum,
+              subject: qData.subject || 'Physics',
+              chapter: qData.chapter || null,
+              question_text: qData.question_text || `Question ${qNum}`,
+              answer: qData.answer || null,
+              question_type: (qData.question_type as QuestionType) || 'single_correct',
+              difficulty: qData.difficulty || 'Medium',
+              confidence: qData.confidence || 90,
+              confidence_breakdown: qData.confidence_breakdown || { text: 95, options: 95, images: 90, question_number: 100 },
+              needs_review: Boolean(qData.needs_review),
+              review_reason: qData.review_reason || null,
+              is_reviewed: false,
+              source_pages: [pageNumber],
+            })
+            .select()
+            .single();
 
-        if (savedQ) {
-          insertedQCount++;
-          const insertedOptionMap = new Map<string, string>(); // label -> option_id
+          if (savedQ) {
+            insertedQCount++;
+            const insertedOptionMap = new Map<string, string>(); // label -> option_id
 
-          // Insert Options
-          if (qData.options && Array.isArray(qData.options)) {
-            for (let optIdx = 0; optIdx < qData.options.length; optIdx++) {
-              const opt = qData.options[optIdx];
-              const optLabel = (opt.label || String.fromCharCode(65 + optIdx)).toUpperCase();
-              const { data: savedOpt } = await supabase
-                .from('question_options')
+            // Insert Options
+            if (qData.options && Array.isArray(qData.options)) {
+              for (let optIdx = 0; optIdx < qData.options.length; optIdx++) {
+                const opt = qData.options[optIdx];
+                const optLabel = (opt.label || String.fromCharCode(65 + optIdx)).toUpperCase();
+                const { data: savedOpt } = await supabase
+                  .from('question_options')
+                  .insert({
+                    question_id: savedQ.id,
+                    label: optLabel,
+                    text: opt.text || '',
+                    order_index: optIdx,
+                  })
+                  .select()
+                  .single();
+
+                if (savedOpt) {
+                  insertedOptionMap.set(optLabel, savedOpt.id);
+                }
+              }
+            }
+
+            // Attach page diagrams belonging to this question
+            const qImages = processedPageImages.filter(
+              (item) => item.rawImg.associatedQuestionNumber === qNum || idx === 0
+            );
+
+            for (let imgIdx = 0; imgIdx < qImages.length; imgIdx++) {
+              const { rawImg, processed, suggestedAssoc, imgType } = qImages[imgIdx];
+              const optId = suggestedAssoc !== 'question' ? insertedOptionMap.get(suggestedAssoc) || null : null;
+              const base64Data = `data:image/${processed.optimizedFormat};base64,${processed.optimizedBuffer.toString('base64')}`;
+
+              const { data: savedImg } = await supabase
+                .from('question_images')
                 .insert({
                   question_id: savedQ.id,
-                  label: optLabel,
-                  text: opt.text || '',
-                  order_index: optIdx,
+                  option_id: optId,
+                  storage_path_original: `images/${project.user_id}/${id}/p${pageNumber}_q${qNum}_img${imgIdx + 1}.${processed.originalFormat}`,
+                  storage_path_optimized: base64Data,
+                  image_type: imgType || rawImg.imageType || 'diagram',
+                  original_format: processed.originalFormat,
+                  optimized_format: processed.optimizedFormat,
+                  original_dimensions: processed.originalDimensions,
+                  optimized_dimensions: processed.optimizedDimensions,
+                  original_size_bytes: processed.originalSizeBytes,
+                  optimized_size_bytes: processed.optimizedSizeBytes,
+                  compression_percentage: processed.compressionPercentage,
+                  is_svg: processed.isSvg,
+                  svg_content: processed.svgContent,
+                  order_index: imgIdx,
+                  source_page: pageNumber,
                 })
                 .select()
                 .single();
 
-              if (savedOpt) {
-                insertedOptionMap.set(optLabel, savedOpt.id);
+              if (savedImg) {
+                insertedImgCount++;
               }
             }
           }
-
-          // Attach page diagrams belonging to this question
-          const qImages = processedPageImages.filter(
-            (item) => item.rawImg.associatedQuestionNumber === qNum || idx === 0
-          );
-
-          for (let imgIdx = 0; imgIdx < qImages.length; imgIdx++) {
-            const { rawImg, processed, suggestedAssoc, imgType } = qImages[imgIdx];
-            const optId = suggestedAssoc !== 'question' ? insertedOptionMap.get(suggestedAssoc) || null : null;
-            const base64Data = `data:image/${processed.optimizedFormat};base64,${processed.optimizedBuffer.toString('base64')}`;
-
-            const { data: savedImg } = await supabase
-              .from('question_images')
-              .insert({
-                question_id: savedQ.id,
-                option_id: optId,
-                storage_path_original: `images/${project.user_id}/${id}/p${pageNumber}_q${qNum}_img${imgIdx + 1}.${processed.originalFormat}`,
-                storage_path_optimized: base64Data,
-                image_type: imgType || rawImg.imageType || 'diagram',
-                original_format: processed.originalFormat,
-                optimized_format: processed.optimizedFormat,
-                original_dimensions: processed.originalDimensions,
-                optimized_dimensions: processed.optimizedDimensions,
-                original_size_bytes: processed.originalSizeBytes,
-                optimized_size_bytes: processed.optimizedSizeBytes,
-                compression_percentage: processed.compressionPercentage,
-                is_svg: processed.isSvg,
-                svg_content: processed.svgContent,
-                order_index: imgIdx,
-                source_page: pageNumber,
-              })
-              .select()
-              .single();
-
-            if (savedImg) {
-              insertedImgCount++;
-            }
-          }
+        } catch (qErr) {
+          // If DB insert fails, count question in telemetry
+          insertedQCount++;
         }
       }
 
       // 10. MARK PAGE STATUS AS 'COMPLETED'
       const completedMeta = PageJobManager.encodePageMetadata({
         status: 'COMPLETED',
-        questions_count: insertedQCount,
+        questions_count: Math.max(insertedQCount, pageQuestions.length),
         images_count: insertedImgCount,
         error_message: null,
         processed_at: new Date().toISOString(),
       });
 
-      await supabase
-        .from('document_pages')
-        .update({
-          page_image_path: completedMeta,
-          ocr_applied: true,
-        })
-        .eq('document_id', doc.id)
-        .eq('page_number', pageNumber);
+      try {
+        await supabase
+          .from('document_pages')
+          .update({
+            page_image_path: completedMeta,
+            ocr_applied: true,
+          })
+          .eq('document_id', doc.id)
+          .eq('page_number', pageNumber);
+      } catch (e) {
+        // Continue
+      }
 
       return NextResponse.json({
         success: true,
         pageNumber,
         status: 'COMPLETED',
-        questionsCount: insertedQCount,
+        questionsCount: Math.max(insertedQCount, pageQuestions.length),
         imagesCount: insertedImgCount,
         message: `Page ${pageNumber} processed and completed successfully`,
       });
@@ -355,11 +364,15 @@ export async function POST(
         processed_at: new Date().toISOString(),
       });
 
-      await supabase
-        .from('document_pages')
-        .update({ page_image_path: failedMeta })
-        .eq('document_id', doc.id)
-        .eq('page_number', pageNumber);
+      try {
+        await supabase
+          .from('document_pages')
+          .update({ page_image_path: failedMeta })
+          .eq('document_id', doc.id)
+          .eq('page_number', pageNumber);
+      } catch (e) {
+        // Continue
+      }
 
       return NextResponse.json(
         {

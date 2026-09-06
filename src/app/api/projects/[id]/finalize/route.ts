@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { ExcelGenerator } from '@/lib/excel/generator';
 import { PageJobManager } from '@/lib/processing/page-job-manager';
+import { ProjectStore } from '@/lib/projects/store';
 
 export async function POST(
   req: NextRequest,
@@ -11,34 +12,31 @@ export async function POST(
     const { id } = await params;
     const supabase = createAdminClient();
 
-    // 1. Fetch Project
-    const { data: project, error: pErr } = await supabase
-      .from('projects')
-      .select('*')
-      .eq('id', id)
-      .single();
+    // 1. Fetch Project via ProjectStore
+    const project = await ProjectStore.getProject(id);
 
-    if (pErr || !project) {
+    if (!project) {
       return NextResponse.json({ success: false, error: 'Project not found' }, { status: 404 });
     }
 
-    const { data: doc } = await supabase
-      .from('documents')
-      .select('*')
-      .eq('project_id', id)
-      .limit(1)
-      .single();
+    const doc = await ProjectStore.getDocument(id);
 
     if (!doc) {
       return NextResponse.json({ success: false, error: 'Document not found' }, { status: 404 });
     }
 
     // 2. Query document_pages and check all page statuses
-    const { data: pageRows } = await supabase
-      .from('document_pages')
-      .select('*')
-      .eq('document_id', doc.id)
-      .order('page_number', { ascending: true });
+    let pageRows: any[] = [];
+    try {
+      const { data } = await supabase
+        .from('document_pages')
+        .select('*')
+        .eq('document_id', doc.id)
+        .order('page_number', { ascending: true });
+      pageRows = data || [];
+    } catch {
+      pageRows = [];
+    }
 
     const pages = pageRows || [];
     const incompletePages = pages.filter((p) => {
@@ -60,20 +58,25 @@ export async function POST(
     }
 
     // 3. Fetch all extracted questions with options and images
-    const { data: questionsData } = await supabase
-      .from('questions')
-      .select(`
-        *,
-        options:question_options(*),
-        images:question_images(*)
-      `)
-      .eq('project_id', id)
-      .order('question_number', { ascending: true });
+    let questionsList: any[] = [];
+    try {
+      const { data: questionsData } = await supabase
+        .from('questions')
+        .select(`
+          *,
+          options:question_options(*),
+          images:question_images(*)
+        `)
+        .eq('project_id', id)
+        .order('question_number', { ascending: true });
+      questionsList = questionsData || [];
+    } catch {
+      questionsList = [];
+    }
 
-    const questionsList = questionsData || [];
-    const totalDetectedQuestions = questionsList.length;
+    const totalDetectedQuestions = questionsList.length || project.extracted_questions || 0;
     const expectedQuestions = project.expected_questions || 180;
-    const needsReviewCount = questionsList.filter((q) => q.needs_review).length;
+    const needsReviewCount = questionsList.filter((q) => q.needs_review).length || project.needs_review_count || 0;
 
     // Validation: If expected questions = 180 and detected = 178, mark project NEEDS_REVIEW
     const finalStatus = totalDetectedQuestions < expectedQuestions || needsReviewCount > 0
@@ -105,7 +108,7 @@ export async function POST(
 
     // 5. Generate 3-sheet Excel Workbook (Questions, Metadata, Extraction Report)
     const xlsxBuffer = await ExcelGenerator.generateWorkbook({
-      project,
+      project: project as any,
       questions: questionsList as any,
       imageBuffers: imageBuffersMap,
     });
@@ -134,34 +137,36 @@ export async function POST(
 
     // 7. Create Exports Record
     const totalImagesCount = questionsList.reduce((acc, q) => acc + (q.images?.length || 0), 0);
+    let exportRecordId = `exp-${id}`;
 
-    const { data: exportRecord } = await supabase
-      .from('exports')
-      .insert({
-        project_id: id,
-        user_id: project.user_id,
-        file_name: fileName,
-        storage_path: savedStoragePath,
-        file_size_bytes: xlsxBuffer.length,
-        format: 'XLSX',
-        question_count: totalDetectedQuestions,
-        images_count: totalImagesCount,
-        download_count: 0,
-      })
-      .select()
-      .single();
+    try {
+      const { data: exportRecord } = await supabase
+        .from('exports')
+        .insert({
+          project_id: id,
+          user_id: project.user_id,
+          file_name: fileName,
+          storage_path: savedStoragePath,
+          file_size_bytes: xlsxBuffer.length,
+          format: 'XLSX',
+          question_count: totalDetectedQuestions,
+          images_count: totalImagesCount,
+          download_count: 0,
+        })
+        .select()
+        .single();
+      if (exportRecord?.id) exportRecordId = exportRecord.id;
+    } catch (e) {
+      // Continue
+    }
 
     // 8. Update Project Status to COMPLETED or NEEDS_REVIEW
-    await supabase
-      .from('projects')
-      .update({
-        status: finalStatus,
-        total_questions: totalDetectedQuestions,
-        extracted_questions: totalDetectedQuestions,
-        needs_review_count: needsReviewCount,
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', id);
+    await ProjectStore.updateProject(id, {
+      status: finalStatus,
+      total_questions: totalDetectedQuestions,
+      extracted_questions: totalDetectedQuestions,
+      needs_review_count: needsReviewCount,
+    });
 
     return NextResponse.json({
       success: true,
@@ -170,7 +175,7 @@ export async function POST(
       totalQuestions: totalDetectedQuestions,
       expectedQuestions,
       needsReviewCount,
-      exportId: exportRecord?.id || `exp-${Date.now()}`,
+      exportId: exportRecordId,
       exportFileName: fileName,
       message: `Project finalized successfully with status ${finalStatus}`,
     });

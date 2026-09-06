@@ -4,7 +4,7 @@ import { ImageProcessor } from '@/lib/image/processor';
 import { OpenRouterProvider } from '@/lib/ai/openrouter';
 import { NEETSubjectDetector } from '@/lib/pdf/neet-detector';
 import { ExcelGenerator } from '@/lib/excel/generator';
-import { QuestionType } from '@/types/database';
+import { ProjectStore } from '@/lib/projects/store';
 
 export type PageStatus = 'QUEUED' | 'PROCESSING' | 'COMPLETED' | 'FAILED';
 
@@ -76,17 +76,10 @@ export class PageJobManager {
    */
   static async getPdfBufferForProject(projectId: string): Promise<{ buffer: Buffer; fileName: string; docId: string }> {
     const supabase = createAdminClient();
+    const project = await ProjectStore.getProject(projectId);
+    const doc = await ProjectStore.getDocument(projectId);
 
-    const { data: project } = await supabase.from('projects').select('*').eq('id', projectId).single();
     let fileName = `${project?.name || 'document'}.pdf`;
-
-    const { data: doc } = await supabase
-      .from('documents')
-      .select('*')
-      .eq('project_id', projectId)
-      .limit(1)
-      .maybeSingle();
-
     let pdfBuffer: Buffer | null = null;
 
     if (doc?.storage_path) {
