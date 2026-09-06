@@ -88,12 +88,14 @@ export async function getActiveAIConfig(): Promise<ActiveAIConfig> {
       let resolvedKey = envApiKey;
       if (dbSettings.encrypted_api_key) {
         const decrypted = decryptSecret(dbSettings.encrypted_api_key);
-        if (decrypted) resolvedKey = decrypted;
+        if (decrypted && decrypted.trim().length > 0) {
+          resolvedKey = decrypted;
+        }
       }
 
       return {
         apiKey: resolvedKey,
-        apiKeyMasked: dbSettings.api_key_masked || maskApiKey(resolvedKey),
+        apiKeyMasked: maskApiKey(resolvedKey),
         primaryModel: dbSettings.primary_model || defaultPrimary,
         visionModel: dbSettings.vision_model || defaultVision,
         fallbackModel: dbSettings.fallback_model || defaultFallback,
