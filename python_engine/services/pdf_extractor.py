@@ -3,7 +3,8 @@ PyMuPDF (fitz) & pdfplumber 2D Spatial PDF Extractor
 
 Extracts text blocks with exact (x0, y0, x1, y1) bounding coordinates,
 decodes XObject image streams, renders high-res 300 DPI page images,
-and crops vector drawing paths for diagram preservation.
+crops vector drawing paths for diagram preservation, and applies
+100% deterministic geometric spatial association for questions and options.
 """
 
 import fitz  # PyMuPDF
@@ -12,6 +13,7 @@ import re
 import base64
 from typing import List, Dict, Any, Tuple
 from PIL import Image
+from .spatial_associator import SpatialAssociator
 
 class PDFExtractorService:
     @classmethod
@@ -20,7 +22,8 @@ class PDFExtractorService:
         pdf_bytes: bytes,
         page_number: int,
         dpi: int = 300,
-        extract_images: bool = True
+        extract_images: bool = True,
+        prev_last_question: int = 0
     ) -> Dict[str, Any]:
         """
         Parses a single page from a PDF byte buffer and returns structured 2D spatial data.
@@ -60,15 +63,40 @@ class PDFExtractorService:
         full_page_text = "\n".join(raw_text_parts)
         is_scanned = len(full_page_text.strip()) < 30
 
-        # 2. Detect Question Boundaries with Spatial Y-Bounds
-        question_boundaries = cls._detect_question_spatial_bounds(text_blocks, full_page_text)
+        # 2. Detect Question Boundaries with Spatial Y-Bounds (supporting cross-page continuations)
+        question_boundaries = cls._detect_question_spatial_bounds(text_blocks, full_page_text, page_height, prev_last_question)
 
-        # 3. Extract Embedded XObject Images & Vector Path Crops
+        # 3. Extract Embedded XObject Images & Vector Path Crops with Deterministic Spatial Association
         extracted_images = []
+        raster_count = 0
+        vector_obj_count = 0
+        vector_diagram_count = 0
+
         if extract_images:
-            extracted_images = cls._extract_page_images_and_drawings(doc, page, page_number, dpi)
+            raw_extracted, raster_count, vector_obj_count, vector_diagram_count = cls._extract_page_images_and_drawings(
+                doc, page, page_number, dpi, page_width, page_height
+            )
+
+            # Apply deterministic geometric spatial association for every image
+            for img in raw_extracted:
+                img_box = {"x0": img["x0"], "y0": img["y0"], "x1": img["x1"], "y1": img["y1"]}
+                assoc = SpatialAssociator.associate_image_to_question_or_option(img_box, question_boundaries, page_height)
+                
+                img["associated_question_number"] = assoc["question_number"]
+                img["target_type"] = assoc["target_type"]
+                img["associated_option_label"] = assoc["option"]
+                img["association_method"] = assoc["association_method"]
+                img["confidence"] = assoc["confidence"]
+                img["unmapped_reason"] = assoc["unmapped_reason"]
+
+                extracted_images.append(img)
 
         doc.close()
+
+        # Determine last question number on this page for cross-page continuation linking
+        last_q_num = prev_last_question
+        if question_boundaries:
+            last_q_num = max(qb["question_number"] for qb in question_boundaries)
 
         return {
             "success": True,
@@ -80,19 +108,33 @@ class PDFExtractorService:
             "full_text": full_page_text,
             "text_blocks": text_blocks,
             "question_boundaries": question_boundaries,
-            "images": extracted_images
+            "images": extracted_images,
+            "diagnostics": {
+                "raster_images_count": raster_count,
+                "vector_objects_count": vector_obj_count,
+                "vector_diagrams_count": vector_diagram_count,
+                "total_images_extracted": len(extracted_images),
+                "last_question_number": last_q_num
+            }
         }
 
     @classmethod
-    def _detect_question_spatial_bounds(cls, text_blocks: List[Dict[str, Any]], full_text: str) -> List[Dict[str, Any]]:
+    def _detect_question_spatial_bounds(
+        cls,
+        text_blocks: List[Dict[str, Any]],
+        full_text: str,
+        page_height: float,
+        prev_last_question: int = 0
+    ) -> List[Dict[str, Any]]:
         """
         Detects question numbers (Q1., 1), Question 1, etc.) and constructs spatial bounding rectangles.
+        If no question number starts at the top of the page, creates a continuation boundary linked to prev_last_question.
         """
         question_regex = re.compile(
             r"(?:^|\n)\s*(?:Q(?:uestion)?[\s.:-]*|#\s*)?(\d{1,3})[\s.:\)-]+(?=[A-Z0-9\(\[\{\"'`\+\-~✓])",
             re.IGNORECASE
         )
-        
+
         matches = []
         for block in text_blocks:
             for m in question_regex.finditer(block["text"]):
@@ -107,10 +149,21 @@ class PDFExtractorService:
 
         matches.sort(key=lambda m: (m["y0"], m["question_number"]))
 
+        # Handle cross-page question continuation: if page starts without question number & prev_last_question > 0
+        if prev_last_question > 0 and (not matches or matches[0]["y0"] > 120.0):
+            cont_q = {
+                "question_number": prev_last_question,
+                "x0": 0.0,
+                "y0": 0.0,
+                "block_text": "Cross-page question continuation",
+                "is_continuation": True
+            }
+            matches.insert(0, cont_q)
+
         boundaries = []
         for i, curr in enumerate(matches):
             next_match = matches[i + 1] if i + 1 < len(matches) else None
-            y1_limit = next_match["y0"] if next_match else 842.0
+            y1_limit = next_match["y0"] if next_match else page_height
 
             # Detect option bounds within this question's vertical territory
             option_bounds = cls._detect_option_bounds_in_block(curr["x0"], curr["y0"], y1_limit, text_blocks)
@@ -121,7 +174,8 @@ class PDFExtractorService:
                 "y0": curr["y0"],
                 "x1": 595.28,
                 "y1": round(y1_limit, 2),
-                "option_bounds": option_bounds
+                "option_bounds": option_bounds,
+                "is_continuation": curr.get("is_continuation", False)
             })
 
         return boundaries
@@ -161,13 +215,19 @@ class PDFExtractorService:
         doc: fitz.Document,
         page: fitz.Page,
         page_number: int,
-        dpi: int
-    ) -> List[Dict[str, Any]]:
+        dpi: int,
+        page_width: float,
+        page_height: float
+    ) -> Tuple[List[Dict[str, Any]], int, int, int]:
         """
         Extracts raster XObject image streams and vector drawing path bounding boxes.
+        Returns: (extracted_images_list, raster_count, vector_obj_count, vector_diagram_count)
         """
         extracted = []
         img_counter = 1
+        raster_count = 0
+        vector_obj_count = 0
+        vector_diagram_count = 0
 
         # 1. Raster XObjects
         image_list = page.get_images(full=True)
@@ -183,7 +243,7 @@ class PDFExtractorService:
                 width = base_image["width"]
                 height = base_image["height"]
 
-                if width >= 40 and height >= 40:
+                if width >= 30 and height >= 30:
                     b64_data = f"data:image/{image_ext};base64," + base64.b64encode(image_bytes).decode("utf-8")
                     
                     # Search image bbox on page
@@ -203,34 +263,64 @@ class PDFExtractorService:
                         "is_vector_crop": False
                     })
                     img_counter += 1
+                    raster_count += 1
             except Exception:
                 pass
 
-        # 2. Vector Drawing Paths (Circuits, Geometric Figures, Graphs)
+        # 2. Vector Drawing Paths & Clusters (Circuits, Geometric Figures, Graphs)
         try:
             drawings = page.get_drawings()
             if drawings:
-                # Group vector drawing bounding boxes
-                vector_rects = [d["rect"] for d in drawings if d["rect"].width > 50 and d["rect"].height > 50]
-                for v_rect in vector_rects[:3]: # Limit to top 3 vector diagram crops per page
-                    pix = page.get_pixmap(dpi=dpi, clip=v_rect)
-                    img_bytes = pix.tobytes("png")
-                    b64_data = "data:image/png;base64," + base64.b64encode(img_bytes).decode("utf-8")
+                vector_obj_count = len(drawings)
+                clusters = []
 
-                    extracted.append({
-                        "image_id": f"vec_p{page_number}_{img_counter}",
-                        "x0": round(v_rect.x0, 2),
-                        "y0": round(v_rect.y0, 2),
-                        "x1": round(v_rect.x1, 2),
-                        "y1": round(v_rect.y1, 2),
-                        "width": pix.width,
-                        "height": pix.height,
-                        "format": "png",
-                        "image_base64": b64_data,
-                        "is_vector_crop": True
-                    })
-                    img_counter += 1
+                for d in drawings:
+                    r = d["rect"]
+                    w, h = r.width, r.height
+                    
+                    # Filter out full-width page border lines & header/footer dividers
+                    if w > (page_width - 40) or h > (page_height - 40):
+                        continue
+                    if w < 5 and h > 100:  # Vertical column divider line
+                        continue
+                    if h < 5 and w > 100:  # Horizontal row divider line
+                        continue
+                    if w < 15 or h < 15:   # Tiny bullet dot or noise
+                        continue
+
+                    # Group drawing into clusters (merge if bounding boxes touch or within 20pt)
+                    merged = False
+                    for c in clusters:
+                        if (max(c.x0, r.x0) <= min(c.x1, r.x1) + 20) and (max(c.y0, r.y0) <= min(c.y1, r.y1) + 20):
+                            c.include_rect(r)
+                            merged = True
+                            break
+
+                    if not merged:
+                        clusters.append(fitz.Rect(r))
+
+                # Process meaningful vector diagram bounding box clusters
+                for c_rect in clusters:
+                    if c_rect.width >= 35 and c_rect.height >= 35:
+                        pix = page.get_pixmap(dpi=dpi, clip=c_rect)
+                        img_bytes = pix.tobytes("png")
+                        b64_data = "data:image/png;base64," + base64.b64encode(img_bytes).decode("utf-8")
+
+                        extracted.append({
+                            "image_id": f"vec_p{page_number}_{img_counter}",
+                            "x0": round(c_rect.x0, 2),
+                            "y0": round(c_rect.y0, 2),
+                            "x1": round(c_rect.x1, 2),
+                            "y1": round(c_rect.y1, 2),
+                            "width": pix.width,
+                            "height": pix.height,
+                            "format": "png",
+                            "image_base64": b64_data,
+                            "is_vector_crop": True
+                        })
+                        img_counter += 1
+                        vector_diagram_count += 1
         except Exception:
             pass
 
-        return extracted
+        return extracted, raster_count, vector_obj_count, vector_diagram_count

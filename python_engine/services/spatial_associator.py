@@ -3,7 +3,7 @@
 
 Calculates deterministic spatial relationships between PDF text blocks,
 extracted diagram images, question boundaries, and option rectangles.
-Replaces arbitrary index division (imageIndex % 4) with exact (x0, y0, x1, y1) bounding box geometry.
+Replaces arbitrary index division with exact (x0, y0, x1, y1) 2D bounding box geometry.
 """
 
 from typing import List, Dict, Any, Optional
@@ -32,25 +32,99 @@ class SpatialAssociator:
     def associate_image_to_question_or_option(
         cls,
         image_box: Dict[str, float],
-        question_bound: Dict[str, Any]
+        question_boundaries: List[Dict[str, Any]],
+        page_height: float = 842.0
     ) -> Dict[str, Any]:
         """
-        Determines whether an image belongs to the Question Statement or Option A/B/C/D
-        based on exact Y-position intervals and 2D bounding boxes.
+        Determines deterministic spatial association for an image/vector diagram against question boundaries.
+        Returns:
+          - question_number: int | None
+          - target_type: 'question' | 'option' | 'standalone_diagram' | 'unmapped'
+          - option: 'A' | 'B' | 'C' | 'D' | None
+          - association_method: 'geometric'
+          - confidence: float
+          - unmapped_reason: str | None
         """
-        option_bounds = question_bound.get('option_bounds', [])
-        
+        if not question_boundaries:
+            return {
+                "question_number": None,
+                "target_type": "unmapped",
+                "option": None,
+                "association_method": "geometric",
+                "confidence": 0.0,
+                "unmapped_reason": "no_question_boundaries_on_page"
+            }
+
+        img_y0 = image_box["y0"]
+        img_y1 = image_box["y1"]
+        img_mid_y = (img_y0 + img_y1) / 2.0
+
+        # Ignore header/footer margin images (y < 35 or y > page_height - 35)
+        if img_y1 < 35 or img_y0 > (page_height - 35):
+            return {
+                "question_number": None,
+                "target_type": "unmapped",
+                "option": None,
+                "association_method": "geometric",
+                "confidence": 0.0,
+                "unmapped_reason": "page_header_footer_margin"
+            }
+
+        # 1. Find containing question boundary (where img_mid_y falls within question y0 and y1)
+        matching_q = None
+        for qb in question_boundaries:
+            if qb["y0"] - 15 <= img_mid_y <= qb["y1"] + 15:
+                matching_q = qb
+                break
+
+        # Fallback to closest question boundary by vertical distance
+        if not matching_q:
+            min_dist = float("inf")
+            for qb in question_boundaries:
+                dist = min(abs(img_mid_y - qb["y0"]), abs(img_mid_y - qb["y1"]))
+                if dist < min_dist:
+                    min_dist = dist
+                    matching_q = qb
+
+        if not matching_q:
+            return {
+                "question_number": None,
+                "target_type": "unmapped",
+                "option": None,
+                "association_method": "geometric",
+                "confidence": 0.0,
+                "unmapped_reason": "outside_all_question_boundaries"
+            }
+
+        q_num = matching_q["question_number"]
+        option_bounds = matching_q.get("option_bounds", [])
+
+        # If no options detected in question boundary -> Question Stem diagram
         if not option_bounds:
-            return {'target': 'question', 'confidence': 0.95, 'option_id': None}
+            return {
+                "question_number": q_num,
+                "target_type": "question",
+                "option": None,
+                "association_method": "geometric",
+                "confidence": 0.95,
+                "unmapped_reason": None
+            }
 
-        # Find top Y of the first option
-        first_opt_y0 = min(opt['y0'] for opt in option_bounds)
+        # Find top Y coordinate of the first option label
+        first_opt_y0 = min(opt["y0"] for opt in option_bounds)
 
-        # 1. If image is physically situated above the options -> Question Diagram
-        if image_box['y1'] <= first_opt_y0 + 5:
-            return {'target': 'question', 'confidence': 0.96, 'option_id': None}
+        # 2. If image is physically situated above option labels -> Question Stem Diagram
+        if img_y1 <= first_opt_y0 + 10:
+            return {
+                "question_number": q_num,
+                "target_type": "question",
+                "option": None,
+                "association_method": "geometric",
+                "confidence": 0.96,
+                "unmapped_reason": None
+            }
 
-        # 2. Check overlap with individual option bounding boxes
+        # 3. Check exact 2D bounding box overlap with option rectangles
         best_label = None
         max_overlap = 0.0
 
@@ -58,15 +132,36 @@ class SpatialAssociator:
             overlap = cls.calculate_bounding_box_overlap(image_box, opt)
             if overlap > max_overlap:
                 max_overlap = overlap
-                best_label = opt.get('label')
+                best_label = opt.get("label")
 
-        if best_label and max_overlap >= 0.2:
-            return {'target': best_label, 'confidence': round(0.85 + (max_overlap * 0.14), 2), 'option_id': None}
+        if best_label and max_overlap >= 0.15:
+            return {
+                "question_number": q_num,
+                "target_type": "option",
+                "option": best_label,
+                "association_method": "geometric",
+                "confidence": round(0.85 + (max_overlap * 0.14), 2),
+                "unmapped_reason": None
+            }
 
-        # Fallback based on mid-point Y
-        img_mid_y = (image_box['y0'] + image_box['y1']) / 2.0
+        # 4. Fallback based on mid-point Y matching option Y-interval
         for opt in option_bounds:
-            if opt['y0'] <= img_mid_y <= opt['y1']:
-                return {'target': opt['label'], 'confidence': 0.82, 'option_id': None}
+            if opt["y0"] - 5 <= img_mid_y <= opt["y1"] + 5:
+                return {
+                    "question_number": q_num,
+                    "target_type": "option",
+                    "option": opt.get("label"),
+                    "association_method": "geometric",
+                    "confidence": 0.88,
+                    "unmapped_reason": None
+                }
 
-        return {'target': 'question', 'confidence': 0.75, 'option_id': None}
+        # Default fallback to question stem
+        return {
+            "question_number": q_num,
+            "target_type": "question",
+            "option": None,
+            "association_method": "geometric",
+            "confidence": 0.90,
+            "unmapped_reason": None
+        }

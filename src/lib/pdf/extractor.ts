@@ -79,6 +79,8 @@ export class PDFExtractor {
         height: img.height,
         x: img.x0,
         y: img.y0,
+        associatedQuestionNumber: img.associated_question_number || undefined,
+        associatedOptionLabel: img.associated_option_label || undefined,
         imageType: img.width > 250 ? 'diagram' : 'option_diagram',
       }));
 

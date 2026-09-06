@@ -2,8 +2,8 @@
 QuestionForge AI - Python Document Engine Microservice
 
 FastAPI application providing 2D spatial coordinate layout extraction,
-XObject & vector diagram rendering, PaddleOCR scanned PDF processing,
-and deterministic bounding-box image association.
+XObject & vector diagram rendering, PaddleOCR / PyMuPDF OCR scanned PDF processing,
+and 100% deterministic bounding-box image association.
 """
 
 import base64
@@ -37,6 +37,7 @@ class ExtractPageRequest(BaseModel):
     page_number: int = Field(1, description="Page number to parse (1-indexed)")
     dpi: Optional[int] = Field(300, description="DPI for page rendering and vector crops")
     extract_images: Optional[bool] = Field(True, description="Whether to extract embedded XObjects and vector crops")
+    prev_last_question: Optional[int] = Field(0, description="Last question number from previous page for continuations")
 
 class OCRPageRequest(BaseModel):
     pdf_base64: str
@@ -45,12 +46,19 @@ class OCRPageRequest(BaseModel):
 
 class AssociateImageRequest(BaseModel):
     image_box: Dict[str, float]
-    question_bound: Dict[str, Any]
+    question_boundaries: List[Dict[str, Any]]
+    page_height: Optional[float] = 842.0
 
 # Endpoints
 @app.get("/health")
 def health_check():
-    return {"status": "ok", "service": "QuestionForge Python Document Engine", "version": "1.0.0"}
+    return {
+        "status": "ok",
+        "service": "QuestionForge Python Document Engine",
+        "version": "1.0.0",
+        "ocr_engine": "PyMuPDF-PyTesseract-OpenCV",
+        "spatial_engine": "Deterministic-2D-Geometric"
+    }
 
 @app.post("/api/v1/extract-page")
 def extract_page(req: ExtractPageRequest):
@@ -60,7 +68,8 @@ def extract_page(req: ExtractPageRequest):
             pdf_bytes=pdf_bytes,
             page_number=req.page_number,
             dpi=req.dpi or 300,
-            extract_images=req.extract_images if req.extract_images is not None else True
+            extract_images=req.extract_images if req.extract_images is not None else True,
+            prev_last_question=req.prev_last_question or 0
         )
         return result
     except Exception as e:
@@ -97,7 +106,8 @@ def associate_image(req: AssociateImageRequest):
     try:
         result = SpatialAssociator.associate_image_to_question_or_option(
             image_box=req.image_box,
-            question_bound=req.question_bound
+            question_boundaries=req.question_boundaries,
+            page_height=req.page_height or 842.0
         )
         return result
     except Exception as e:
